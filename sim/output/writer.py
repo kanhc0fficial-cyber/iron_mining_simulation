@@ -2,18 +2,27 @@
 增量写 Parquet / CSV 输出。
 
 每 batch_size 行写入一次，降低内存开销。
-最终调用 close() 刷入剩余行。
+Parquet 格式使用 pyarrow.ParquetWriter 实现真正的逐批写入，
+不在内存中累积所有批次；CSV 格式用追加模式写入同一文件。
+最终调用 close() 刷入剩余行并关闭文件句柄。
 """
 
 from __future__ import annotations
-import os
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from sim.output.schema import OUTPUT_COLUMNS
+
+# Parquet 输出的 Arrow schema（全部 float64，t 列为 int64）
+def _build_schema(columns: list[str]) -> pa.Schema:
+    fields = [pa.field("t", pa.int64())]
+    for col in columns:
+        fields.append(pa.field(col, pa.float64()))
+    return pa.schema(fields)
 
 
 class Writer:
@@ -40,11 +49,14 @@ class Writer:
         self._batch_size = batch_size
         self._columns = columns if columns is not None else OUTPUT_COLUMNS
         self._buffer: list[dict] = []
-        self._parquet_parts: list[pd.DataFrame] = []
         self._csv_first_chunk = True
 
         # 确保父目录存在
         self._path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Parquet 增量写入器（首次 _flush 时惰性创建）
+        self._pq_writer: pq.ParquetWriter | None = None
+        self._pq_schema: pa.Schema = _build_schema(self._columns)
 
     def write_row(self, bus: dict) -> None:
         """
@@ -60,10 +72,12 @@ class Writer:
             self._flush()
 
     def close(self) -> None:
-        """刷入剩余缓冲区并合并写入最终文件。"""
+        """刷入剩余缓冲区并关闭文件句柄。"""
         if self._buffer:
             self._flush()
-        self._finalize()
+        if self._pq_writer is not None:
+            self._pq_writer.close()
+            self._pq_writer = None
 
     # ── 内部方法 ──────────────────────────────────────────────────────────
 
@@ -71,7 +85,10 @@ class Writer:
         df = pd.DataFrame(self._buffer, columns=["t"] + self._columns)
         self._buffer.clear()
         if self._fmt == "parquet":
-            self._parquet_parts.append(df)
+            if self._pq_writer is None:
+                self._pq_writer = pq.ParquetWriter(self._path, self._pq_schema)
+            table = pa.Table.from_pandas(df, schema=self._pq_schema, preserve_index=False)
+            self._pq_writer.write_table(table)
         else:
             df.to_csv(
                 self._path,
@@ -80,9 +97,3 @@ class Writer:
                 index=False,
             )
             self._csv_first_chunk = False
-
-    def _finalize(self) -> None:
-        if self._fmt == "parquet" and self._parquet_parts:
-            combined = pd.concat(self._parquet_parts, ignore_index=True)
-            combined.to_parquet(self._path, index=False)
-            self._parquet_parts.clear()

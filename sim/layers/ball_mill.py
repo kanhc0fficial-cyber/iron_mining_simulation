@@ -68,10 +68,11 @@ class BallMillInput:
         d80_ball = float(np.clip(d80_raw, cfg.d80_ball_min, cfg.d80_ball_max))
 
         # f_{-25μm}：反 S 形函数
-        # f25 = f25_max * sigmoid(k_f25 * (d80_ref - d80)) + noise
+        # f25 = f25_max * sigmoid(k_f25 * (d80_ref - d80) + bias_f25) + noise
+        # bias_f25 保证 d80=d80_ref 时精确输出 f25_ref（见 BallMillConfig）
         f25_noise = self._rng.normal(0.0, cfg.sigma_f25)
         f25 = float(np.clip(
-            cfg.f25_max * float(expit(cfg.k_f25 * (cfg.d80_ref - d80_ball))) + f25_noise,
+            cfg.f25_max * float(expit(cfg.k_f25 * (cfg.d80_ref - d80_ball) + cfg.bias_f25)) + f25_noise,
             0.0, 1.0,
         ))
 

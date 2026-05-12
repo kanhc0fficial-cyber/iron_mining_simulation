@@ -103,8 +103,6 @@ def main() -> None:
     m_wm_conc = beta_wm * d1_cal * m_ball_nom / g_wmag
     m_wm_tail_flow = m_ball_nom - m_wm_conc
 
-    m_wm_tail_flow = m_ball_nom - m_wm_conc     # alias used below
-
     # 强磁精矿质量流
     g_feed_strong = g_wm_tail
     if g_strong > 0.01 and m_wm_tail_flow > 0.01:

@@ -78,11 +78,13 @@ class BallMillConfig:
     d80_ball_max: float = 0.110
 
     # f_{-25μm} 反 S 形函数参数
-    # f25 = f25_max / (1 + exp(-k_f25 * (d80_ref - d80))) + noise
+    # f25 = f25_max * sigmoid(k_f25 * (d80_ref - d80) + bias_f25) + noise
+    # bias_f25 = logit(f25_ref / f25_max) 保证 d80 = d80_ref 时 f25 = f25_ref
     f25_max: float = 0.80
     k_f25: float = 60.0
     d80_ref: float = 0.074            # mm，标定参考点
-    f25_ref: float = 0.5419           # 文档标定值
+    f25_ref: float = 0.5419           # 文档标定值（d80=d80_ref 时的 f25）
+    bias_f25: float = 0.7417          # logit(0.5419/0.80)，使标定点精确通过
     sigma_f25: float = 0.005
 
     # 三条线之间相关系数（共用同一扰动分量驱动）

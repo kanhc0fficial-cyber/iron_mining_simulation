@@ -51,11 +51,11 @@ class FirstOrderThermal:
 
     @property
     def steady_state_temp(self) -> float:
-        """当前散热条件下，若 Q_heat 保持不变时的理论稳态温度。
+        """稳态温度（只读）。
 
-        需外部先 step() 一次以确保 Q_heat 已隐式积分；
-        该属性基于最后一次步进的温度估计稳态。
-        实际使用时建议直接用 T_ss = T_amb + Q_heat / k_cool 计算。
+        基于当前 self.T 和内部参数无法直接计算（需要外部提供 Q_heat）；
+        请在调用处直接使用：
+            T_ss = T_amb + Q_heat / k_cool
         """
         raise NotImplementedError(
             "请直接计算: T_ss = T_amb + Q_heat / k_cool"

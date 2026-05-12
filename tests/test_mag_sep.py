@@ -89,7 +89,7 @@ class TestMagSepOutputCompleteness:
 
 class TestMagSepPIDConvergence:
     def test_level_converges_within_300_steps(self):
-        """液位应在 300 步（5 min）内稳定至设定值附近（±0.3 m）。"""
+        """液位应在 300 步（5 小时）内稳定至设定值附近（±0.3 m）。"""
         history = run_n_steps(600)
         cfg = MagSepConfig()
         # 取后 100 步（300~600步）的平均液位

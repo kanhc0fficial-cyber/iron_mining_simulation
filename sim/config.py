@@ -17,6 +17,7 @@ class SimConfig:
     n_steps: int = 43_200        # 总步数（30天 = 43200步）
     seed: int = 42               # 全局随机种子
     warm_up_steps: int = 300     # 预热步数（使动态状态达到稳态）
+    open_loop: bool = False      # 开环激励模式（PRBS加药 + 扩大d1扰动）
 
 
 @dataclass
@@ -52,6 +53,9 @@ class DisturbanceConfig:
 
     # d1–d2 地质相关性（碳酸铁高时原矿品位往往偏低）
     cov_d1d2: float = -0.6
+
+    # 开环模式下 d1 扰动幅度放大倍数（≥1.0）
+    d1_sigma_open_factor: float = 10.0
 
 
 @dataclass
@@ -393,3 +397,153 @@ class TowerMillConfig:
     k_ov_I: float = 80.0              # A/(m³/s)，流量-电流系数
     rho_ov: float = 1120.0            # kg/m³，溢流密度（~14.93%）
     sigma_I_ov: float = 0.30          # A
+
+
+@dataclass
+class FlotationConfig:
+    """浮选段参数（两系列浮选槽 + 加药网络 + 化验时滞）。
+
+    标定基准（来自考查报告）：
+      - Q_TD=2100 g/t → 精矿TFe ≈ 67.43 %，尾矿 ≈ 12.86 %
+      - Q_TD=1500 g/t → 精矿TFe ≈ 66.56 %，尾矿 ≈ 20.90 %
+      - 稳态 pH ∈ [9.2, 10.1]
+
+    动力学模型：
+      eta_Fe(Q_TD) = eta_Fe0 + k_eta_Fe * (Q_TD - Q_TD_nom)   [Fe 回收率]
+      R_Si(Q_TD, pH) = R_Si0 + k_R_Si * (Q_TD - Q_TD_nom) + k_R_Si_pH * (pH - pH_nom)
+      TFe_conc = eta_Fe * g_ov / (eta_Fe*g_ov + (1-R_Si)*(1-g_ov))
+      TFe_circuit(t+dt) = TFe_ss + (TFe_circuit(t) - TFe_ss) * exp(-dt/tau_flo)
+    """
+
+    # ── 塔磨 → 浮选段间时滞 ──────────────────────────────────────────────
+    delay_steps_tm: int = 30          # 步，30 min @ 60 s/步
+
+    # 名义塔磨溢流参数（RingBuffer 初始化用）
+    m_ov_nom: float = 750.0           # t/h 每系列
+    g_ov_nom: float = 0.4384          # TFe 品位（小数）
+    rho_ov: float = 1120.0            # kg/m³（溢流密度 ~14.93%）
+
+    # ── 浮选前浓缩机（NT-30，2台）───────────────────────────────────────
+    tau_NT: float = 300.0             # s
+    rho_NT_target: float = 0.39       # 底流浓度（质量分数）
+    I_NT0: float = 10.0               # A，空载基础电流
+    k_NT_I: float = 0.02              # A/(t/h 固体)
+    sigma_NT_I: float = 0.3           # A
+    sigma_NT_rho: float = 0.005       # 浓度测量噪声
+
+    # ── 浮选动力学（标定参数）──────────────────────────────────────────
+    # 中间点 Q_TD_nom = 1800 g/t（1500/2100 两点线性插值）
+    eta_Fe0: float = 0.8180           # Fe 回收率（Q_TD = Q_TD_nom 时）
+    k_eta_Fe: float = 1.84e-4         # Fe 回收率 Q_TD 偏导（/g/t）
+    R_Si0: float = 0.6857             # Si 去除率（Q_TD = Q_TD_nom 时）
+    k_R_Si: float = -4.97e-5          # Si 去除率 Q_TD 偏导（/g/t，负值）
+    Q_TD_nom: float = 1800.0          # g/t，名义加药量
+    Q_TD_min: float = 500.0           # g/t，加药量下限
+    Q_TD_max: float = 3500.0          # g/t，加药量上限
+    tau_flo: float = 800.0            # s，TFe 回路响应时间常数
+    k_R_Si_pH: float = 0.02           # pH 对 Si 去除率的影响（/单位pH）
+
+    # ── pH 动力学 ─────────────────────────────────────────────────────
+    pH_nom: float = 9.6
+    pH_init: float = 9.6
+    tau_pH: float = 600.0             # s
+    sigma_pH: float = 0.05
+    k_pH_d2: float = 3.0              # d2（碳酸铁）对 pH 的抑制系数
+
+    # ── 浮选槽液位（每系列 7 个槽，串联流）────────────────────────────────
+    A_cell: float = 10.0              # m²，液槽截面积
+    L_sp: float = 1.5                 # m，液位设定值
+    L_init: float = 1.5               # m，初始液位
+    Kp_lv: float = 0.4               # 液位阀比例增益
+    tau_act_lv: float = 15.0          # s，阀门执行机构时间常数
+    C_v_lv: float = 0.21             # m^2.5/s，阀门流量系数（串联回路每槽通全流量，比并联 0.03 大 7 倍）
+    sigma_u_lv: float = 0.005         # 阀门噪声
+
+    # ── 泡沫层高度 ──────────────────────────────────────────────────────
+    h_froth_init: float = 0.30        # m
+    k_gen_froth: float = 0.50         # 泡沫生成系数
+    k_col_froth: float = 0.005        # /s，泡沫消散系数
+    k_scrape: float = 0.002           # 刮泡系数
+    omega_scraper: float = 2.0        # rpm，刮泡机转速
+    p_fault_froth: float = 0.005      # 泡沫层传感器故障概率
+    fault_val_froth: float = -21.0    # °C，故障异常值
+    sigma_h_froth: float = 0.02       # m
+
+    # ── 充气系统 ─────────────────────────────────────────────────────
+    Q_air_nom: float = 0.010          # m³/s，每槽名义充气量
+    sigma_Q_air: float = 0.001        # m³/s
+    phi_Q_air_sp: float = 0.999       # 充气量设定值 AR(1) 系数（慢变）
+    sigma_Q_air_sp: float = 3e-5      # m³/s，充气量设定白噪声（慢速调节）
+    sigma_bv: float = 0.010           # 蝶阀位置噪声
+
+    # ── 浮选机电机电流 ───────────────────────────────────────────────
+    I_FXJ0: float = 22.0              # A，额定电流（典型浮选机电机 11~22 kW）
+    k_FXJ: float = 0.003              # A/(kg/m³ 矿浆密度偏差)
+    sigma_I_FXJ: float = 2.5          # A
+
+    # ── 加药泵（每系列 5 种：粗选TD、精选TD、K6粗选、NaOH、CaO）──────
+    f_td_rough_nom: float = 30.0      # Hz，粗选 TD 泵频率
+    f_td_clean_nom: float = 20.0      # Hz，精选 TD 泵频率
+    f_k6_rough_nom: float = 25.0      # Hz，K6 粗选泵
+    f_naoh_nom: float = 15.0          # Hz，NaOH 泵
+    f_cao_nom: float = 20.0           # Hz，CaO 泵
+    phi_drug: float = 0.99            # AR(1) 系数
+    sigma_drug_f: float = 0.30        # Hz，泵频率噪声
+    I_drug0: float = 2.0              # A，泵基础电流
+    k_drug_If: float = 0.08           # A/Hz
+    sigma_drug_I: float = 0.10        # A
+
+    # ── 开环 PRBS 加药 ────────────────────────────────────────────────
+    Q_TD_prbs_low: float = 1200.0     # g/t，PRBS 低值
+    Q_TD_prbs_high: float = 2400.0    # g/t，PRBS 高值
+    p_prbs_switch: float = 0.005      # 每步切换概率（期望保持 200 步/状态）
+
+    # ── 搅拌槽温度（每系列 3 个：TD/K6/CaO 搅拌槽）────────────────────
+    T_tk_sp: float = 50.0             # °C，设定值
+    T_tk_init: float = 50.0           # °C
+    tau_tk: float = 600.0             # s，热时间常数
+    u_TV_nom: float = 0.20            # 蒸汽阀名义开度
+    Kp_TV: float = 0.02               # 温度 PID 比例增益
+    tau_TV: float = 30.0              # s，蒸汽阀执行机构
+    sigma_T_tk: float = 0.30          # °C
+    sigma_TV: float = 0.005           # 阀门噪声
+
+    # ── 泵池（每系列 3 个）─────────────────────────────────────────────
+    A_pool_flo: float = 5.0           # m²，泵池截面积
+    L_pool_flo_sp: float = 1.0        # m，液位设定值
+    L_pool_flo_init: float = 1.0      # m
+    k_pump_flo: float = 0.0016        # m³/(s·Hz·m^0.5)，泵特性系数
+    f_pump_flo_nom: float = 40.0      # Hz，泵额定频率
+    f_pump_flo_min: float = 20.0      # Hz
+    f_pump_flo_max: float = 50.0      # Hz
+    Kp_pool_flo: float = 5.0          # Hz/m，液位→频率增益
+    sigma_f_pump_flo: float = 0.20    # Hz
+    I_pump_flo0: float = 10.0         # A，基础电流
+    k_pump_flo_I: float = 0.015       # A/Hz²
+    sigma_I_pool: float = 0.30        # A
+    sigma_L_pool_flo: float = 0.020   # m
+
+    # ── 鼓风机 ─────────────────────────────────────────────────────────
+    P_blower_nom: float = 30.0        # kPa，名义出口压力
+    sigma_blower: float = 0.50        # kPa
+    phi_blower: float = 0.99
+
+    # ── 变压器有功功率 ───────────────────────────────────────────────
+    sigma_P_AH: float = 5.0           # kW
+
+    # ── 入矿流量传感器 ───────────────────────────────────────────────
+    sigma_Q_ft: float = 0.005         # m³/s
+
+    # ── K6 贮药箱液位 ────────────────────────────────────────────────
+    L_k6_init: float = 1.5            # m
+    sigma_L_k6: float = 0.02          # m
+    phi_k6: float = 0.9995            # AR(1) 慢漂移系数
+
+    # ── 化验时滞（LabAssayer）────────────────────────────────────────
+    tau_lab_min: int = 120            # 步，化验最小延迟（120 min）
+    tau_lab_max: int = 240            # 步，化验最大延迟（240 min）
+    lab_buf_capacity: int = 300       # RingBuffer 容量（步）
+    sigma_lab: float = 0.0012         # TFe 化验噪声（小数单位，≈0.12%）
+    delta_12: float = 0.002           # 第2系列品位偏置（+0.2%）
+    assay_interval_min: int = 240     # 步，化验最小间隔（4 h）
+    assay_interval_max: int = 480     # 步，化验最大间隔（8 h）

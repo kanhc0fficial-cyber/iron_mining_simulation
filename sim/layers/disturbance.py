@@ -20,9 +20,15 @@ class DisturbanceLayer:
       _x_d4 : 公共管网水压 (MPa)
     """
 
-    def __init__(self, cfg: DisturbanceConfig, rng: np.random.Generator) -> None:
+    def __init__(
+        self,
+        cfg: DisturbanceConfig,
+        rng: np.random.Generator,
+        open_loop: bool = False,
+    ) -> None:
         self._cfg = cfg
         self._rng = rng
+        self._open_loop = open_loop
 
         # OU 过程残差初始化为 0（预热阶段自然收敛到稳态分布）
         self._xi_d1: float = 0.0
@@ -30,27 +36,28 @@ class DisturbanceLayer:
         self._xi_d3: float = 0.0
         self._xi_d4: float = 0.0
 
-        # 预计算 d1-d2 Cholesky 分解矩阵
-        # Cov = [[σ₁², ρ·σ₁·σ₂],
-        #        [ρ·σ₁·σ₂, σ₂²]]
-        s1 = cfg.d1_sigma
+        # 预计算 d1-d2 Cholesky 分解矩阵（正常模式和开环模式各一份）
+        # L = [[s1, 0], [rho*s2, s2*sqrt(1-rho²)]]
         s2 = cfg.d2_sigma
         rho = cfg.cov_d1d2
-        # L = Cholesky(Cov)，使得L@L^T = Cov
-        # L = [[s1, 0],
-        #      [rho*s2, s2*sqrt(1-rho²)]]
-        self._L = np.array([
-            [s1, 0.0],
-            [rho * s2, s2 * np.sqrt(max(1.0 - rho ** 2, 0.0))],
-        ])
+
+        def _make_L(s1: float) -> np.ndarray:
+            return np.array([
+                [s1, 0.0],
+                [rho * s2, s2 * np.sqrt(max(1.0 - rho ** 2, 0.0))],
+            ])
+
+        self._L_normal = _make_L(cfg.d1_sigma)
+        self._L_open = _make_L(cfg.d1_sigma * cfg.d1_sigma_open_factor)
 
     def step(self, bus: dict) -> None:
         """推进一步，将 _x_d1~d4 写入 bus。"""
         cfg = self._cfg
 
-        # d1/d2：相关 OU 噪声
+        # d1/d2：相关 OU 噪声（开环模式下扩大 d1 扰动幅度）
         z = self._rng.standard_normal(2)
-        eta12 = self._L @ z                     # shape (2,)
+        L = self._L_open if self._open_loop else self._L_normal
+        eta12 = L @ z                           # shape (2,)
 
         self._xi_d1 = cfg.d1_phi * self._xi_d1 + eta12[0]
         self._xi_d2 = cfg.d2_phi * self._xi_d2 + eta12[1]

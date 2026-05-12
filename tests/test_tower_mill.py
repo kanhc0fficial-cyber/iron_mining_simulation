@@ -215,16 +215,16 @@ class TestTowerMillTemperatures:
 
 
 class TestTowerMillFaultInjection:
-    """故障注入：1500 步内应出现 −287.04°C 轴承温度异常值。
+    """故障注入：足够步数内应出现 −287.04°C 温度异常值。
 
-    p_fault = 0.002 → 1500 步内无故障的概率 ≈ 0.998^1500 ≈ 0.05（5%）。
-    该测试在 95% 概率下通过；对于固定 seed=42 已验证可通过。
+    p_fault = 0.002，双传感器（2 个轴承/定子），N=3500 步：
+    P(无故障) = (1-0.002)^(2*3500) ≈ 6.3e-13，实际上不可能。
     """
 
     FAULT_VAL = -287.04
-    N_STEPS = 1500
+    N_STEPS = 3500
 
-    def _collect_temps(self, history: list[dict]) -> list[float]:
+    def _collect_bearing_temps(self, history: list[dict]) -> list[float]:
         temps = []
         for bus in history:
             temps.append(bus["MC1_TM204_HDZC_1_WD_AI"])
@@ -232,24 +232,24 @@ class TestTowerMillFaultInjection:
         return temps
 
     def test_bearing_fault_appears(self):
-        """1500 步内轴承温度应出现 −287.04°C 异常值。"""
-        history = run_n_steps(self.N_STEPS, seed=42)
-        temps = self._collect_temps(history)
+        """N_STEPS 步内轴承温度应出现 −287.04°C 异常值。"""
+        history = run_n_steps(self.N_STEPS)
+        temps = self._collect_bearing_temps(history)
         fault_count = sum(1 for v in temps if abs(v - self.FAULT_VAL) < 0.01)
         assert fault_count > 0, (
-            f"1500 步内未出现轴承温度故障值 {self.FAULT_VAL}°C（seed=42）"
+            f"{self.N_STEPS} 步内未出现轴承温度故障值 {self.FAULT_VAL}°C"
         )
 
     def test_stator_fault_appears(self):
-        """1500 步内定子温度应出现 −287.04°C 异常值。"""
-        history = run_n_steps(self.N_STEPS, seed=42)
+        """N_STEPS 步内定子温度应出现 −287.04°C 异常值。"""
+        history = run_n_steps(self.N_STEPS)
         stator_temps = []
         for bus in history:
             stator_temps.append(bus["MC1_TM204_ZDJ_DZ_A_WD_AI"])
             stator_temps.append(bus["MC1_TM206_ZDJ_DZ_B_WD_AI"])
         fault_count = sum(1 for v in stator_temps if abs(v - self.FAULT_VAL) < 0.01)
         assert fault_count > 0, (
-            f"1500 步内未出现定子温度故障值 {self.FAULT_VAL}°C（seed=42）"
+            f"{self.N_STEPS} 步内未出现定子温度故障值 {self.FAULT_VAL}°C"
         )
 
 

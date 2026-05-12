@@ -51,7 +51,79 @@ STEP2_COLUMNS: list[str] = [
 ]
 
 # ── 第三步：浮选段 DCS 变量 + 目标变量（占位，第三步填充）───────────────────
+_CELLS = ["cx1", "cx2", "cx3", "jx", "sx1", "sx2", "sx3"]
+_SERIES = [1, 2]
+_N_TANKS = 3
+_N_POOLS = 3
+
 STEP3_COLUMNS: list[str] = []
+
+# 浓缩机（4 个）
+STEP3_COLUMNS += [
+    "fx_nt1_motor_current",
+    "fx_nt2_motor_current",
+    "fx_nt1_underflow_density",
+    "fx_nt2_underflow_density",
+]
+
+# 浮选槽（6 变量 × 7 槽 × 2 系列 = 84 个）
+for _s in _SERIES:
+    for _c in _CELLS:
+        STEP3_COLUMNS += [
+            f"fx_s{_s}_{_c}_froth_h",
+            f"fx_s{_s}_{_c}_level_sp",
+            f"fx_s{_s}_{_c}_level_fb",
+            f"fx_s{_s}_{_c}_air_flow",
+            f"fx_s{_s}_{_c}_air_sp",
+            f"fx_s{_s}_{_c}_bv_pos",
+        ]
+
+# 浮选机电机电流（7 × 2 = 14 个）
+for _s in _SERIES:
+    for _c in _CELLS:
+        STEP3_COLUMNS.append(f"fx_s{_s}_{_c}_motor_curr")
+
+# 加药泵（10 × 2 = 20 个）
+_PUMP_KEYS = ["td_rough", "td_clean", "k6_rough", "naoh", "cao"]
+for _s in _SERIES:
+    for _pk in _PUMP_KEYS:
+        STEP3_COLUMNS += [f"fx_s{_s}_{_pk}_freq", f"fx_s{_s}_{_pk}_curr"]
+
+# pH（2 个）
+STEP3_COLUMNS += ["fx_s1_ph", "fx_s2_ph"]
+
+# 搅拌槽温度（3 变量 × 3 槽 × 2 系列 = 18 个）
+for _s in _SERIES:
+    for _k in range(1, _N_TANKS + 1):
+        STEP3_COLUMNS += [
+            f"fx_s{_s}_tk{_k}_temp",
+            f"fx_s{_s}_tk{_k}_steam_sp",
+            f"fx_s{_s}_tk{_k}_steam_fb",
+        ]
+
+# 泵池（3 变量 × 3 池 × 2 系列 = 18 个）
+for _s in _SERIES:
+    for _k in range(1, _N_POOLS + 1):
+        STEP3_COLUMNS += [
+            f"fx_s{_s}_pool{_k}_level",
+            f"fx_s{_s}_pool{_k}_pump_freq",
+            f"fx_s{_s}_pool{_k}_pump_curr",
+        ]
+
+# 鼓风机（2 个）
+STEP3_COLUMNS += ["fx_blower1_pressure", "fx_blower2_pressure"]
+
+# 变压器有功功率（2 个）
+STEP3_COLUMNS += ["fx_ah5_power", "fx_ah6_power"]
+
+# 入矿流量（4 个）
+STEP3_COLUMNS += ["fx_s1_ft1701", "fx_s1_ft1702", "fx_s2_ft2701", "fx_s2_ft2702"]
+
+# K6 贮药箱液位（2 个）
+STEP3_COLUMNS += ["fx_s1_k6_level", "fx_s2_k6_level"]
+
+# 目标变量（2 个：精矿 TFe 化验值）
+STEP3_COLUMNS += ["y_fx_xin1", "y_fx_xin2"]
 
 # ── 当前激活输出列（第一步仅含磁选段）──────────────────────────────────────
 OUTPUT_COLUMNS: list[str] = STEP1_COLUMNS + STEP2_COLUMNS + STEP3_COLUMNS

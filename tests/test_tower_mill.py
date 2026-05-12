@@ -293,6 +293,9 @@ class TestTowerMillIntegration:
             "MC1_TM206_HDZC_2_WD_AI",
             "MC1_TM204_ZDJ_DZ_A_WD_AI",
             "MC1_TM206_ZDJ_DZ_B_WD_AI",
+            # 浮选化验时滞目标变量：化验间隔期内为 NaN（设计如此）
+            "y_fx_xin1",
+            "y_fx_xin2",
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:

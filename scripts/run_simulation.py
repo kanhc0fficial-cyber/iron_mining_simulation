@@ -17,7 +17,7 @@ from pathlib import Path
 # 将项目根目录加入 sys.path，使 `sim` 包可直接导入
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sim.config import SimConfig, DisturbanceConfig, BallMillConfig, MagSepConfig
+from sim.config import SimConfig, DisturbanceConfig, BallMillConfig, MagSepConfig, FlotationConfig
 from sim.simulator import Simulator
 
 
@@ -43,22 +43,28 @@ def parse_args() -> argparse.Namespace:
         "--no-warmup", action="store_true",
         help="跳过预热阶段",
     )
+    parser.add_argument(
+        "--open-loop", action="store_true",
+        help="开环激励模式（PRBS 加药 + 扩大扰动方差）",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    sim_cfg = SimConfig(seed=args.seed)
+    sim_cfg = SimConfig(seed=args.seed, open_loop=args.open_loop)
     dist_cfg = DisturbanceConfig()
     ball_cfg = BallMillConfig()
     mag_cfg = MagSepConfig()
+    flo_cfg = FlotationConfig()
 
     sim = Simulator(
         sim_cfg=sim_cfg,
         dist_cfg=dist_cfg,
         ball_cfg=ball_cfg,
         mag_cfg=mag_cfg,
+        flo_cfg=flo_cfg,
         output_path=args.output,
         fmt=args.format,
     )

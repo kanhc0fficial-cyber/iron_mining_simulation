@@ -65,7 +65,7 @@ class TestOutputSchema:
         assert len(OUTPUT_COLUMNS) == len(set(OUTPUT_COLUMNS)), "存在重复列名"
 
     def test_step3_column_count(self) -> None:
-        assert len(STEP3_COLUMNS) == 172
+        assert len(STEP3_COLUMNS) == 186
 
 
 # ── 2. 短仿真健全检查（100 步，约 1s）────────────────────────────────────

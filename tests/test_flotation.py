@@ -151,15 +151,33 @@ class TestOutputColumns:
             v = bus.get(col, float("nan"))
             if not isinstance(v, float):
                 v = float(v)
-            if not (0.0 <= abs(v) < 1e12):  # also catches NaN since NaN < 1e12 is False
-                bad.append((col, v))
-            elif v != v:  # explicit NaN check
+            if not np.isfinite(v):
                 bad.append((col, v))
         assert not bad, f"异常值：{bad[:5]}"
 
     def test_step3_columns_count(self) -> None:
-        """STEP3_COLUMNS 应恰好含 172 列（170 DCS + 2 目标）。"""
-        assert len(STEP3_COLUMNS) == 172, f"实际列数：{len(STEP3_COLUMNS)}"
+        """STEP3_COLUMNS 应恰好含 186 列（184 DCS + 2 目标）。"""
+        assert len(STEP3_COLUMNS) == 186, f"实际列数：{len(STEP3_COLUMNS)}"
+
+    def test_level_column_is_in_meters(self) -> None:
+        """fx_s*_*_level 应为液位（m），典型值应在 [0, 5] m 范围内。"""
+        flo = _make_system(seed=3)
+        _run_steps(flo, 100)
+        bus = _make_bus()
+        flo.step(bus, 100)
+        level = bus["fx_s1_cx1_level"]
+        assert 0.0 <= level <= 5.0, f"fx_s1_cx1_level={level:.3f}，应为液位（m）"
+
+    def test_level_valve_sp_fb_range(self) -> None:
+        """valve_sp/fb 应在 [0, 1] 范围（阀门开度）。"""
+        flo = _make_system(seed=4)
+        _run_steps(flo, 100)
+        bus = _make_bus()
+        flo.step(bus, 100)
+        sp = bus["fx_s1_cx1_level_valve_sp"]
+        fb = bus["fx_s1_cx1_level_valve_fb"]
+        assert 0.0 <= sp <= 1.0, f"level_valve_sp={sp:.3f}，应在 [0,1]"
+        assert 0.0 <= fb <= 1.0, f"level_valve_fb={fb:.3f}，应在 [0,1]"
 
 
 # ── 4. 泡沫层故障注入 ────────────────────────────────────────────────────

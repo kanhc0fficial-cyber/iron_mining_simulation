@@ -66,13 +66,17 @@ STEP3_COLUMNS += [
     "fx_nt2_underflow_density",
 ]
 
-# 浮选槽（6 变量 × 7 槽 × 2 系列 = 84 个）
+# 浮选槽（7 变量 × 7 槽 × 2 系列 = 98 个）
+# level        : 浮选槽液位实测值 (m)
+# level_valve_sp: 液位调节阀开度给定 (0~1)
+# level_valve_fb: 液位调节阀开度反馈 (0~1)
 for _s in _SERIES:
     for _c in _CELLS:
         STEP3_COLUMNS += [
             f"fx_s{_s}_{_c}_froth_h",
-            f"fx_s{_s}_{_c}_level_sp",
-            f"fx_s{_s}_{_c}_level_fb",
+            f"fx_s{_s}_{_c}_level",
+            f"fx_s{_s}_{_c}_level_valve_sp",
+            f"fx_s{_s}_{_c}_level_valve_fb",
             f"fx_s{_s}_{_c}_air_flow",
             f"fx_s{_s}_{_c}_air_sp",
             f"fx_s{_s}_{_c}_bv_pos",

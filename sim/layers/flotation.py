@@ -298,8 +298,16 @@ class FlotationSystem:
                     h_raw, cfg.p_fault_froth, cfg.fault_val_froth, rng
                 )
 
-        # 浮选机电机电流（基础电流 + 噪声）
-        I_FXJ = cfg.I_FXJ0 + rng.normal(0, cfg.sigma_I_FXJ, (_N_SERIES, _N_CELLS))
+        # 浮选机电机电流（与矿浆密度弱耦合）
+        # I = I_FXJ0 + k_FXJ*(rho_slurry - rho_nom) + noise
+        # rho_slurry 用上游延迟溢流流量估算（给矿量偏高时矿浆更密）
+        rho_slurry_est = cfg.rho_ov + (m_ov_del - cfg.m_ov_nom) * 0.05  # kg/m³ approx
+        rho_deviation = rho_slurry_est - cfg.rho_ov
+        I_FXJ = (
+            cfg.I_FXJ0
+            + cfg.k_FXJ * rho_deviation
+            + rng.normal(0, cfg.sigma_I_FXJ, (_N_SERIES, _N_CELLS))
+        )
         I_FXJ = np.clip(I_FXJ, 1.0, 30.0)
 
         # ── 7. 搅拌槽温度 ─────────────────────────────────────────────
@@ -412,17 +420,18 @@ class FlotationSystem:
         bus["fx_nt1_underflow_density"] = float(rho_NT_dcs[0])
         bus["fx_nt2_underflow_density"] = float(rho_NT_dcs[1])
 
-        # 浮选槽（每系列 7 槽，6 变量/槽）
+        # 浮选槽（每系列 7 槽，7 变量/槽）
         for s in range(_N_SERIES):
             sn = s + 1
             for c in range(_N_CELLS):
                 cn = _CELLS[c]
-                bus[f"fx_s{sn}_{cn}_froth_h"]   = float(h_froth_dcs[s, c])
-                bus[f"fx_s{sn}_{cn}_level_sp"]  = float(u_lv_sp[s, c])
-                bus[f"fx_s{sn}_{cn}_level_fb"]  = float(u_lv_dcs[s, c])
-                bus[f"fx_s{sn}_{cn}_air_flow"]  = float(Q_air[s, c])
-                bus[f"fx_s{sn}_{cn}_air_sp"]    = float(Q_air_sp[s, c])
-                bus[f"fx_s{sn}_{cn}_bv_pos"]    = float(u_bv_dcs[s, c])
+                bus[f"fx_s{sn}_{cn}_froth_h"]        = float(h_froth_dcs[s, c])
+                bus[f"fx_s{sn}_{cn}_level"]           = float(L_dcs[s, c])
+                bus[f"fx_s{sn}_{cn}_level_valve_sp"]  = float(u_lv_sp[s, c])
+                bus[f"fx_s{sn}_{cn}_level_valve_fb"]  = float(u_lv_dcs[s, c])
+                bus[f"fx_s{sn}_{cn}_air_flow"]        = float(Q_air[s, c])
+                bus[f"fx_s{sn}_{cn}_air_sp"]          = float(Q_air_sp[s, c])
+                bus[f"fx_s{sn}_{cn}_bv_pos"]          = float(u_bv_dcs[s, c])
 
         # 浮选机电机电流
         for s in range(_N_SERIES):

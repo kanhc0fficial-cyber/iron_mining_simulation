@@ -218,3 +218,172 @@ class MagSepConfig:
     k_pipe: float = 50.0              # kPa·h²/m⁶，管路阻力系数（近似）
     Q_flush: float = 0.01             # m³/s，冲矿水量（操作员设定）
     sigma_P_flush: float = 0.002      # MPa，压力测量噪声
+
+
+@dataclass
+class TowerMillConfig:
+    """塔磨段参数（旋流器分级 + 塔磨机研磨 + 温度场）。
+
+    标定基准（来自考查报告）：
+      - P_mech ∈ [730, 950] kW（CSM-1120，65~85% 负载）
+      - 溢流 −325目 ≥ 92.5%
+      - 旋流器分级质效率 ≈ 24.81%（即稳态溢流率 α_ov ≈ 0.2481）
+
+    说明：
+      溢流率 α_ov 在本模型中直接作为「分级质效率」的近似量，
+      标定取 α_0 = 0.2481，使名义稳态与考查报告数据吻合。
+    """
+
+    # ── 段间时滞（磁选 → 塔磨，RingBuffer 延迟）───────────────────────────
+    delay_steps: int = 20             # 20 min = 20 步 @ 60 s/步
+
+    # 名义混磁精矿参数（用于初始化延迟缓冲区）
+    m_mag_nom: float = 526.0          # t/h，名义混磁精矿质量流量
+    g_mag_nom: float = 0.4384         # 名义混磁精矿 TFe 品位
+    rho_slurry_mag: float = 1500.0    # kg/m³，磁精矿浆体密度（~45% 浓度）
+
+    # ── 给矿泵池（pump pool）──────────────────────────────────────────────
+    A_pool: float = 8.0               # m²，泵池截面积
+    L_pool_init: float = 1.8          # m，液位初始值
+    L_pool_setpoint: float = 1.8      # m，液位设定值
+
+    # 泵池补水阀（比例控制）
+    k_pool_pid: float = 0.4           # 1/m，泵池水阀比例增益
+    u_pool_mean: float = 0.50         # 基础开度（操作员设定）
+    C_v_pool: float = 0.0010          # m³/(s·kPa^0.5)，水阀流量系数
+    sigma_b_pool: float = 0.020       # m，液位传感器漂移步噪声
+    sigma_L_pool: float = 0.010       # m，液位测量白噪声
+
+    # 三旋给矿泵（离心泵，变频调速）
+    # Q_pump = k_pump * f_pump * sqrt(max(L_pool, 0))
+    k_pump: float = 0.0083            # m³/(s·Hz·m^0.5)，泵流量系数
+    f_pump_init: float = 40.0         # Hz，初始频率
+    f_pump_nom: float = 40.0          # Hz，名义频率
+    f_pump_min: float = 30.0          # Hz
+    f_pump_max: float = 50.0          # Hz
+    # 频率跟踪：f(t) = phi_f*f(t-1) + (1-phi_f)*[f_nom + k_fb*(L-Lsp)] + eta
+    phi_f_pump: float = 0.85          # 频率 AR(1) 平滑系数
+    k_fb_pump: float = 5.0            # Hz/m，液位误差反馈增益
+    sigma_eta_f: float = 0.10         # Hz，频率噪声
+
+    # 泵电流模型（水力功率 → 电流）
+    a0_pump: float = 35.0             # m，额定扬程（零流量）
+    a1_pump: float = 5.0e-4           # m/(m³/s)²，扬程曲线斜率
+    eta_pump: float = 0.80            # 泵效率
+    V_pump: float = 380.0             # V，泵电机线电压
+    cos_phi_pump: float = 0.85        # 功率因数
+    sigma_I_pump: float = 0.30        # A，电流测量噪声
+    sigma_Q_pump: float = 0.0030      # m³/s，流量测量噪声
+
+    # ── 旋流器分级（cyclone）──────────────────────────────────────────────
+    # α_ov(t) = clip(α_0 + k_αd*(1-exp(-d80/d_ref)) - k_αP*P_cyc + w, 0.05, 0.95)
+    alpha_0: float = 0.2481           # 基础溢流率（标定：分级质效率 24.81%）
+    k_alpha_d: float = 0.05           # d80 粒度对溢流率的影响
+    k_alpha_P: float = 0.00005        # 旋流器压力对溢流率的影响（1/kPa）
+    d_ref_cyc: float = 0.060          # mm，粒度归一化参考点
+    # P_cyc = k_P_cyc * rho_slurry * (f_pump/f_nom)²  [kPa]
+    k_P_cyc: float = 0.30             # kPa·m³/kg，旋流器给矿压力系数
+    sigma_alpha: float = 0.008        # 分级效率随机噪声
+
+    # 旋流器给矿流量传感器（含高频宽幅震荡特性）
+    k_Lf: float = 5.0                 # 液位导数对流量读数的影响倍数
+    sigma_Q_feed: float = 0.0030      # m³/s，流量计白噪声
+
+    # ── 塔磨研磨动力学（闭路研磨）────────────────────────────────────────
+    d80_tm_init: float = 0.060        # mm，磨机入料初始 d80（沉砂）
+    tau_mill: int = 8                 # 步，磨矿停留时间（8 min @ 60s/步）
+    k_mill: float = 0.0025            # 研磨速率常数（Bond 简化模型）
+    P_rated: float = 1120.0           # kW，CSM-1120 额定功率
+
+    # P_mech = P0 + k_ms*m_sand[t/h] + k_md*(1-f325_sand) + noise
+    # 标定：P0=250kW，k_ms=0.32kW/(t/h)，名义 m_sand≈1920t/h → P≈865kW
+    P0_mech: float = 250.0            # kW，空载功率
+    k_ms: float = 0.32                # kW/(t/h)，沉砂量对功率的贡献
+    k_md: float = 40.0                # kW，粒度粗度贡献
+    sigma_P_mech: float = 5.0         # kW，功率测量噪声
+    rho_slurry_nom: float = 1450.0    # kg/m³，旋流器给矿浆体名义密度
+
+    # −325目模型：f325_ov = f325_ov_base + k_f325*(P_mech/P_rated)
+    # 标定：P=808kW → f325=0.900+0.040*0.721=0.929≥0.925 ✓
+    f325_ov_base: float = 0.900       # 基础溢流 −325目含量
+    k_f325: float = 0.040             # P_mech/P_rated 对 −325目的贡献
+    sigma_f325: float = 0.003         # 噪声
+    f325_sand_nom: float = 0.55       # 名义沉砂 −325目含量（用于 P_mech 计算）
+
+    # ── 主电机（6kV，CSM-1120）────────────────────────────────────────────
+    V_line_tm: float = 6000.0         # V，电机线电压
+    cos_phi_motor: float = 0.88       # 功率因数
+    sigma_I_motor_tm: float = 0.50    # A，电流测量噪声
+
+    # ── 沉砂补水阀（操作员间歇调整）──────────────────────────────────────
+    u_sand_mean: float = 0.60         # 基础开度
+    tau_act_sand: float = 20.0        # s，执行机构时间常数（一阶跟踪）
+    T_adj_sand: float = 28800.0       # s，操作员调整周期（8 小时/班）
+    sigma_sand_adj: float = 0.08      # 每次调整幅度标准差
+    sigma_u_sand_fb: float = 0.005    # 阀位反馈传感器噪声
+    C_v_sand: float = 0.0050          # m³/(s·kPa^0.5)，沉砂水阀流量系数
+    sigma_Q_sand_water: float = 0.0010 # m³/s，流量计噪声
+
+    # ── 轴承温度（滑动轴承 1 & 2）────────────────────────────────────────
+    # 热模型：ZOH 精确离散（始终数值稳定）
+    #   T(t+dt) = T_ss + (T(t) - T_ss) * phi
+    #   T_ss_b = T_amb + k_b_kw * P_mech[kW]
+    #   phi_b = exp(-dt / tau_b)
+    # 标定（@ P_mech_nom = 920 kW，T_amb = 25°C）：
+    #   T_b1_ss = 55°C → k_b1_kw = (55-25)/920 = 0.0326 °C/kW
+    #   T_b2_ss = 53°C → k_b2_kw = (53-25)/920 = 0.0304 °C/kW
+    T_amb: float = 25.0               # °C，环境温度
+
+    tau_b1: float = 1800.0            # s，轴承1热时间常数（30 min）
+    k_b1_kw: float = 0.0326           # °C/kW，轴承1稳态温度系数
+    T_b1_init: float = 55.0           # °C
+    sigma_b1: float = 0.50            # °C
+
+    tau_b2: float = 2100.0            # s，轴承2热时间常数（35 min）
+    k_b2_kw: float = 0.0304           # °C/kW，轴承2稳态温度系数
+    T_b2_init: float = 53.0           # °C
+    sigma_b2: float = 0.50            # °C
+
+    p_fault_bearing: float = 0.002    # 轴承温度传感器故障概率（考查报告标定）
+    fault_val_bearing: float = -287.04 # °C，故障异常值
+
+    # ── 主电机定子温度（A、B 相）─────────────────────────────────────────
+    # ZOH 模型：T_ss_sA = T_coolant + k_sA_a2 * I_motor²[A²]
+    # 标定（@ I_motor_nom = 96A，T_coolant = 30°C）：
+    #   T_sA_ss = 80°C → k_sA_a2 = (80-30)/96² = 0.00543 °C/A²
+    tau_sA: float = 900.0             # s，定子热时间常数（15 min）
+    k_sA_a2: float = 0.00543          # °C/A²，定子稳态温度系数
+    T_coolant: float = 30.0           # °C，冷却介质温度
+    T_sA_init: float = 80.0           # °C
+    sigma_sA: float = 0.50            # °C
+
+    dT_AB: float = 1.5                # °C，B 相相对 A 相固定偏置
+    sigma_AB: float = 0.30            # °C
+
+    p_fault_stator: float = 0.002     # 定子温度传感器故障概率
+    fault_val_stator: float = -287.04 # °C
+
+    # ── 减速机温度（油池 & 出油口）───────────────────────────────────────
+    # ZOH 模型：T_ss_red = T_amb + k_red_kw * P_loss[kW]
+    #   P_loss = P_mech * (1-eta_red)/eta_red  [kW]
+    # 标定（@ P_mech_nom = 920kW，η=0.96 → P_loss=38.3kW，T_amb=25°C）：
+    #   T_red_ss = 55°C → k_red_kw = (55-25)/38.3 = 0.783 °C/kW
+    tau_red: float = 2400.0           # s，减速机热时间常数（40 min）
+    eta_red: float = 0.96             # 减速机效率
+    k_red_kw: float = 0.783           # °C/kW，减速机稳态温度系数
+    T_red_init: float = 55.0          # °C
+    sigma_red: float = 0.30           # °C
+    alpha_pipe: float = 0.92          # 出油口温度衰减系数
+    sigma_red_out: float = 0.30       # °C
+
+    # ── 旋流器溢流泵池───────────────────────────────────────────────────
+    A_ov: float = 3.0                 # m²
+    L_ov_init: float = 0.80           # m
+    L_ov_low: float = 0.30            # m，泵启动下限液位
+    Q_ov_pump_nom: float = 0.10       # m³/s，溢流泵额定流量
+    sigma_L_ov: float = 0.020         # m
+
+    I_ov_0: float = 5.0               # A，溢流泵空载电流
+    k_ov_I: float = 80.0              # A/(m³/s)，流量-电流系数
+    rho_ov: float = 1120.0            # kg/m³，溢流密度（~14.93%）
+    sigma_I_ov: float = 0.30          # A

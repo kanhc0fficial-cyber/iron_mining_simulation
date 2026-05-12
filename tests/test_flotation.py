@@ -215,3 +215,71 @@ class TestOpenLoop:
             if len(Q_states) > 1:
                 break
         assert len(Q_states) > 1, f"Q_TD 未切换：{Q_states}"
+
+# ── 6. 信号质量（方差 & 范围）────────────────────────────────────────────
+
+_CELLS_TEST = ["cx1", "cx2", "cx3", "jx", "sx1", "sx2", "sx3"]
+
+
+class TestSignalQuality:
+    """验证之前发现的零方差/钳位 Bug 已修复。"""
+
+    def test_transformer_power_not_clamped(self) -> None:
+        """fx_ah5/ah6_power 不应始终钳位在 100 kW（零方差）。"""
+        flo = _make_system(seed=20)
+        _run_steps(flo, 100)
+        powers = []
+        for t in range(100, 200):
+            bus = _make_bus()
+            flo.step(bus, t)
+            powers.append(bus["fx_ah5_power"])
+        arr = np.array(powers)
+        assert arr.mean() > 100.0, f"P_AH 均值 {arr.mean():.1f} kW 应 > 100 kW"
+        assert arr.std() > 0.1, f"P_AH 标准差 {arr.std():.2f} kW 应 > 0"
+
+    def test_air_sp_has_variance(self) -> None:
+        """air_sp 列应随时间缓慢变化（非零方差），模拟操作员调节。"""
+        flo = _make_system(seed=21)
+        _run_steps(flo, 200)
+        air_sps = []
+        for t in range(200, 600):
+            bus = _make_bus()
+            flo.step(bus, t)
+            air_sps.append(bus["fx_s1_cx1_air_sp"])
+        arr = np.array(air_sps)
+        assert arr.std() > 1e-6, f"air_sp 标准差 {arr.std():.2e} 应 > 0"
+
+    def test_pool_level_responds_to_feed_change(self) -> None:
+        """泵池液位应响应给矿量阶跃变化（不再固定不变）。"""
+        flo = _make_system(seed=22)
+        _run_steps(flo, 200, m_ov=750.0)
+        lvl_before = []
+        for t in range(200, 250):
+            bus = _make_bus(m_ov=750.0)
+            flo.step(bus, t)
+            lvl_before.append(bus["fx_s1_pool1_level"])
+        _run_steps(flo, 200, m_ov=1200.0)
+        lvl_after = []
+        for t in range(450, 500):
+            bus = _make_bus(m_ov=1200.0)
+            flo.step(bus, t)
+            lvl_after.append(bus["fx_s1_pool1_level"])
+        mean_before = float(np.mean(lvl_before))
+        mean_after = float(np.mean(lvl_after))
+        assert mean_after > mean_before + 0.01, (
+            f"泵池液位未响应给矿量增加：{mean_before:.3f}→{mean_after:.3f} m"
+        )
+
+    def test_cells_have_different_levels(self) -> None:
+        """串联级联后，各槽液位应各自独立（不完全相同）。"""
+        flo = _make_system(seed=23)
+        for t in range(500):
+            bus = _make_bus()
+            flo.step(bus, t)
+        bus = _make_bus()
+        flo.step(bus, 500)
+        levels = [bus[f"fx_s1_{c}_level"] for c in _CELLS_TEST]
+        level_range = max(levels) - min(levels)
+        assert level_range > 0.001, (
+            f"所有槽液位完全相同（range={level_range:.6f}），未体现级联差异"
+        )

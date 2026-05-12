@@ -450,13 +450,13 @@ class FlotationConfig:
     sigma_pH: float = 0.05
     k_pH_d2: float = 3.0              # d2（碳酸铁）对 pH 的抑制系数
 
-    # ── 浮选槽液位（每系列 7 个槽）──────────────────────────────────────
+    # ── 浮选槽液位（每系列 7 个槽，串联流）────────────────────────────────
     A_cell: float = 10.0              # m²，液槽截面积
     L_sp: float = 1.5                 # m，液位设定值
     L_init: float = 1.5               # m，初始液位
     Kp_lv: float = 0.4               # 液位阀比例增益
     tau_act_lv: float = 15.0          # s，阀门执行机构时间常数
-    C_v_lv: float = 0.03              # m^2.5/s，阀门流量系数
+    C_v_lv: float = 0.21             # m^2.5/s，阀门流量系数（串联回路每槽通全流量，比并联 0.03 大 7 倍）
     sigma_u_lv: float = 0.005         # 阀门噪声
 
     # ── 泡沫层高度 ──────────────────────────────────────────────────────
@@ -472,12 +472,14 @@ class FlotationConfig:
     # ── 充气系统 ─────────────────────────────────────────────────────
     Q_air_nom: float = 0.010          # m³/s，每槽名义充气量
     sigma_Q_air: float = 0.001        # m³/s
+    phi_Q_air_sp: float = 0.999       # 充气量设定值 AR(1) 系数（慢变）
+    sigma_Q_air_sp: float = 3e-5      # m³/s，充气量设定白噪声（慢速调节）
     sigma_bv: float = 0.010           # 蝶阀位置噪声
 
     # ── 浮选机电机电流 ───────────────────────────────────────────────
-    I_FXJ0: float = 5.0               # A，空载电流
+    I_FXJ0: float = 22.0              # A，额定电流（典型浮选机电机 11~22 kW）
     k_FXJ: float = 0.003              # A/(kg/m³ 矿浆密度偏差)
-    sigma_I_FXJ: float = 0.30         # A
+    sigma_I_FXJ: float = 2.5          # A
 
     # ── 加药泵（每系列 5 种：粗选TD、精选TD、K6粗选、NaOH、CaO）──────
     f_td_rough_nom: float = 30.0      # Hz，粗选 TD 泵频率

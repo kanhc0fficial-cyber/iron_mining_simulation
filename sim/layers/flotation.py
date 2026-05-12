@@ -82,8 +82,9 @@ class FlotationSystem:
         self._h_froth = np.full((_N_SERIES, _N_CELLS), cfg.h_froth_init)
         self._u_bv = np.full((_N_SERIES, _N_CELLS), 0.5)     # 蝶阀开度（AR(1)）
 
-        # 名义液位阀开度（由稳态流量平衡预计算）
-        Q_in_cell_nom = cfg.m_ov_nom * 1000.0 / cfg.rho_ov / 3600.0 / _N_CELLS
+        # 名义液位阀开度（由稳态流量平衡预计算，使用全流量而非 1/7）
+        # 串联回路中每槽均通过总流量 Q_total_s
+        Q_in_cell_nom = cfg.m_ov_nom * 1000.0 / cfg.rho_ov / 3600.0
         self._u_lv_nom = float(np.clip(
             Q_in_cell_nom / (cfg.C_v_lv * math.sqrt(max(cfg.L_sp, 0.01))),
             0.05, 0.95,
@@ -122,10 +123,9 @@ class FlotationSystem:
         # ── 泵池（shape: (_N_SERIES, _N_POOLS)）──────────────────────
         self._L_pools = np.full((_N_SERIES, _N_POOLS), cfg.L_pool_flo_init)
         self._f_pumps = np.full((_N_SERIES, _N_POOLS), cfg.f_pump_flo_nom)
-        # 泵池名义入流量 = 槽总流量 / 泵池数
-        self._Q_in_pool_nom = float(
-            cfg.m_ov_nom * 1000.0 / cfg.rho_ov / 3600.0 / _N_POOLS
-        )
+
+        # ── 充气量设定值（慢变 AR(1)，每系列每槽独立）──────────────
+        self._Q_air_sp = np.full((_N_SERIES, _N_CELLS), cfg.Q_air_nom)
 
         # ── 鼓风机压力（2 台）────────────────────────────────────────
         self._P_blower = np.full(2, cfg.P_blower_nom)
@@ -245,7 +245,8 @@ class FlotationSystem:
         self._TFe_circuit = TFe_ss + (self._TFe_circuit - TFe_ss) * self._phi_flo
 
         # ── 6. 浮选槽液位 & 泡沫层高度 ──────────────────────────────
-        Q_in_cell = Q_total_s / _N_CELLS   # m³/s 每槽（均匀分配）
+        # 串联级联：矿浆全量流过每个槽，首槽入流 = Q_total_s，
+        # 后续槽入流 = 前槽出流（保持质量守恒，不均分）。
 
         # 液位阀控制
         u_lv_sp = np.clip(
@@ -264,6 +265,12 @@ class FlotationSystem:
         Q_out_pulp = cfg.C_v_lv * self._u_lv_fb * np.sqrt(
             np.maximum(self._L_cells, 0.0)
         )
+
+        # 串联级联入流：slot 0 = Q_total_s；slot c = Q_out[c-1]
+        Q_in_cell = np.empty((_N_SERIES, _N_CELLS))
+        Q_in_cell[:, 0] = Q_total_s
+        Q_in_cell[:, 1:] = Q_out_pulp[:, :-1]
+
         # 液位 ODE（前向欧拉）
         dL = (Q_in_cell - Q_out_pulp) / cfg.A_cell
         self._L_cells += dL * dt
@@ -277,9 +284,21 @@ class FlotationSystem:
         u_bv_dcs = np.clip(self._u_bv + rng.normal(0, cfg.sigma_bv, (_N_SERIES, _N_CELLS)), 0.1, 0.9)
 
         # 充气量（每槽）
-        Q_air = cfg.Q_air_nom + rng.normal(0, cfg.sigma_Q_air, (_N_SERIES, _N_CELLS))
+        Q_air = self._Q_air_sp + rng.normal(0, cfg.sigma_Q_air, (_N_SERIES, _N_CELLS))
         Q_air = np.clip(Q_air, 0.0, 0.05)
-        Q_air_sp = cfg.Q_air_nom * np.ones((_N_SERIES, _N_CELLS))
+        # 充气量设定值：慢速 AR(1) 围绕名义值漂移（模拟操作员调节）
+        # 合法范围限制在名义值的 [50%, 200%]
+        Q_air_sp_lo = cfg.Q_air_nom * 0.5
+        Q_air_sp_hi = cfg.Q_air_nom * 2.0
+        self._Q_air_sp = np.clip(
+            cfg.Q_air_nom + cfg.phi_Q_air_sp * (self._Q_air_sp - cfg.Q_air_nom)
+            + rng.normal(0, cfg.sigma_Q_air_sp, (_N_SERIES, _N_CELLS)),
+            Q_air_sp_lo, Q_air_sp_hi,
+        )
+        Q_air_sp = np.clip(
+            self._Q_air_sp + rng.normal(0, cfg.sigma_Q_air * 0.5, (_N_SERIES, _N_CELLS)),
+            Q_air_sp_lo, Q_air_sp_hi,
+        )
 
         # 泡沫层高度 ZOH
         C_Si_approx = np.clip(1.0 - self._TFe_circuit, 0.1, 0.9)[:, None]  # (2,1)
@@ -308,7 +327,7 @@ class FlotationSystem:
             + cfg.k_FXJ * rho_deviation
             + rng.normal(0, cfg.sigma_I_FXJ, (_N_SERIES, _N_CELLS))
         )
-        I_FXJ = np.clip(I_FXJ, 1.0, 30.0)
+        I_FXJ = np.clip(I_FXJ, 10.0, 50.0)
 
         # ── 7. 搅拌槽温度 ─────────────────────────────────────────────
         u_TV_sp = np.clip(
@@ -328,9 +347,12 @@ class FlotationSystem:
         u_TV_fb_dcs = np.clip(self._u_TV_fb + rng.normal(0, cfg.sigma_TV, (_N_SERIES, _N_TANKS)), 0.0, 1.0)
 
         # ── 8. 泵池液位 & 泵频率 ──────────────────────────────────────
+        # 入流使用实时延迟溢流流量（而非固定名义值），从而响应给矿量变化
+        # Q_total_s 是标量，在 ODE 中自动广播到 (_N_SERIES, _N_POOLS)
+        Q_in_pool = Q_total_s / _N_POOLS
         Q_pump_pool = (cfg.k_pump_flo * self._f_pumps
                        * np.sqrt(np.maximum(self._L_pools, 0.0)))
-        dL_pool = (self._Q_in_pool_nom - Q_pump_pool) / cfg.A_pool_flo
+        dL_pool = (Q_in_pool - Q_pump_pool) / cfg.A_pool_flo
         self._L_pools += dL_pool * dt
         self._L_pools = np.clip(self._L_pools, 0.0, 5.0)
         # 变频控制：液位偏差→频率调整

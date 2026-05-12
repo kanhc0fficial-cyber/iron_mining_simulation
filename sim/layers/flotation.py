@@ -298,8 +298,8 @@ class FlotationSystem:
                     h_raw, cfg.p_fault_froth, cfg.fault_val_froth, rng
                 )
 
-        # 浮选机电机电流
-        I_FXJ = cfg.I_FXJ0 + cfg.k_FXJ * (1400.0 - 1400.0) + rng.normal(0, cfg.sigma_I_FXJ, (_N_SERIES, _N_CELLS))
+        # 浮选机电机电流（基础电流 + 噪声）
+        I_FXJ = cfg.I_FXJ0 + rng.normal(0, cfg.sigma_I_FXJ, (_N_SERIES, _N_CELLS))
         I_FXJ = np.clip(I_FXJ, 1.0, 30.0)
 
         # ── 7. 搅拌槽温度 ─────────────────────────────────────────────

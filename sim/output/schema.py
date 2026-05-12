@@ -28,8 +28,27 @@ STEP1_COLUMNS: list[str] = [
     "agg_mag_motor_voltage_rc",       # 主电机BC线电压 (V)
 ]
 
-# ── 第二步：塔磨段 18 个 DCS 变量（占位，第二步填充）────────────────────────
-STEP2_COLUMNS: list[str] = []
+# ── 第二步：塔磨段 18 个 DCS 变量──────────────────────────────────────────
+STEP2_COLUMNS: list[str] = [
+    "agg_tm_cyclone_pool_level",          # 泵池液位 (m)
+    "agg_tm_cyclone_pool_valve_setpoint", # 泵池水阀位给定 (0~1)
+    "MC1_FET503_AI",                      # 泵池加水流量 (m³/s)
+    "agg_tm_cyclone_feed_flow",           # 旋流器给矿管道流量 (m³/s)
+    "agg_tm_cyclone_pump_freq",           # 三旋给矿泵频率 (Hz)
+    "agg_tm_cyclone_pump_current",        # 三旋给矿泵电流 (A)
+    "agg_tm_cyclone_sand_valve_setpoint", # 沉砂水阀位给定 (0~1)
+    "agg_tm_cyclone_sand_valve_feedback", # 沉砂水阀位反馈 (0~1)
+    "agg_tm_cyclone_sand_water_flow",     # 旋流器沉砂加水流量 (m³/s)
+    "agg_tm_motor_current",               # 塔磨主电机电流 (A)
+    "MC1_TM204_HDZC_1_WD_AI",            # 滑动轴承温度1 (°C)
+    "MC1_TM206_HDZC_2_WD_AI",            # 滑动轴承温度2 (°C)
+    "MC1_TM204_ZDJ_DZ_A_WD_AI",          # 主电机定子温度A (°C)
+    "MC1_TM206_ZDJ_DZ_B_WD_AI",          # 主电机定子温度B (°C)
+    "agg_tm_reducer_oil_temp",            # 减速机油池温度 (°C)
+    "agg_tm_reducer_outlet_temp",         # 减速机出油口温度 (°C)
+    "agg_tm_cyclone_overflow_pool_level", # 旋流器溢流泵池液位 (m)
+    "agg_tm_overflow_pump_current",       # 旋流器溢流泵电流 (A)
+]
 
 # ── 第三步：浮选段 DCS 变量 + 目标变量（占位，第三步填充）───────────────────
 STEP3_COLUMNS: list[str] = []

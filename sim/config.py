@@ -295,11 +295,12 @@ class TowerMillConfig:
     k_mill: float = 0.0025            # 研磨速率常数（Bond 简化模型）
     P_rated: float = 1120.0           # kW，CSM-1120 额定功率
 
-    # P_mech = P0 + k_ms*m_sand[t/h] + k_md*(1-f325_sand) + noise
-    # 标定：P0=250kW，k_ms=0.32kW/(t/h)，名义 m_sand≈1920t/h → P≈865kW
+    # P_mech = P0 + k_ms*m_sand[t/h] + k_md*(1-f325_sand) + k_mrho*(ρ_mill-ρ_nom) + noise
+    # 标定：P0=250kW，k_ms=0.32kW/(t/h)，名义 m_sand≈1920t/h → P≈865kW（密度项偏差约-13kW）
     P0_mech: float = 250.0            # kW，空载功率
     k_ms: float = 0.32                # kW/(t/h)，沉砂量对功率的贡献
     k_md: float = 40.0                # kW，粒度粗度贡献
+    k_mrho: float = 0.20              # kW/(kg/m³)，矿浆密度偏差对功率的贡献（设计文档 §4.6）
     sigma_P_mech: float = 5.0         # kW，功率测量噪声
     rho_slurry_nom: float = 1450.0    # kg/m³，旋流器给矿浆体名义密度
 

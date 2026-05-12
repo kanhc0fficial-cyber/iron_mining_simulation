@@ -220,15 +220,36 @@ class TowerMillSystem:
         # 沉砂质量流量（t/h，湿态）
         m_sand = Q_sand * cfg.rho_slurry_nom * 3600.0 / 1000.0
 
-        # ── 3. 塔磨研磨动力学 ────────────────────────────────────────
+        # ── 3. 沉砂水阀（前置，为 §4.6 矿浆密度路径提供 Q_sand_water）────
+        t_sec = t * dt
+        if t_sec - self._t_last_adj >= cfg.T_adj_sand:
+            adj = self._rng.normal(0.0, cfg.sigma_sand_adj)
+            self._u_sand_sp = float(np.clip(cfg.u_sand_mean + adj, 0.0, 1.0))
+            self._t_last_adj = t_sec
+        tau_act = max(cfg.tau_act_sand, dt)
+        self._u_sand_fb += (dt / tau_act) * (self._u_sand_sp - self._u_sand_fb)
+        u_sand_fb_dcs = add_noise(self._u_sand_fb, cfg.sigma_u_sand_fb, self._rng)
+        u_sand_fb_dcs = float(np.clip(u_sand_fb_dcs, 0.0, 1.0))
+
+        Q_sand_water = cfg.C_v_sand * self._u_sand_fb * math.sqrt(max(d4_kpa, 0.0))
+        Q_sand_water = max(Q_sand_water, 0.0)
+        Q_sand_water_dcs = add_noise(Q_sand_water, cfg.sigma_Q_sand_water, self._rng)
+
+        # ── 4. 磨内矿浆密度（沉砂浆体 + 补水混合，设计文档 §4.6）─────────
+        # Q_sand_water → ρ_slurry,mill → P_mech → f_{-325μm,ov} → TFe
+        Q_mix = max(Q_sand + Q_sand_water, 1e-9)
+        rho_mill = (Q_sand * cfg.rho_slurry_nom + Q_sand_water * 1000.0) / Q_mix
+
+        # ── 5. 塔磨研磨动力学 ────────────────────────────────────────
         # 沉砂中 −325目含量（名义值）
         f325_sand = cfg.f325_sand_nom
 
-        # 机械功率
+        # 机械功率（含矿浆密度偏差项，设计文档 §4.6）
         P_mech = (
             cfg.P0_mech
             + cfg.k_ms * m_sand
             + cfg.k_md * (1.0 - f325_sand)
+            + cfg.k_mrho * (rho_mill - cfg.rho_slurry_nom)
             + self._rng.normal(0.0, cfg.sigma_P_mech)
         )
         P_mech = float(np.clip(P_mech, 0.0, cfg.P_rated * 1.1))
@@ -248,33 +269,18 @@ class TowerMillSystem:
             0.0, 1.0,
         ))
 
-        # ── 4. 主电机电流 ─────────────────────────────────────────────
+        # ── 6. 主电机电流 ─────────────────────────────────────────────
         I_motor = P_mech * 1000.0 / (_SQRT3 * cfg.V_line_tm * cfg.cos_phi_motor)
         I_motor_dcs = add_noise(I_motor, cfg.sigma_I_motor_tm, self._rng)
 
-        # ── 5. 泵电流 ────────────────────────────────────────────────
+        # ── 7. 泵电流 ────────────────────────────────────────────────
         H_pump = max(cfg.a0_pump - cfg.a1_pump * Q_pump ** 2, 0.0)
         P_pump_W = (cfg.rho_slurry_nom * 9.81 * H_pump * Q_pump) / cfg.eta_pump
         I_pump = P_pump_W / (_SQRT3 * cfg.V_pump * cfg.cos_phi_pump)
         I_pump_dcs = add_noise(I_pump, cfg.sigma_I_pump, self._rng)
         Q_pump_dcs = add_noise(Q_pump, cfg.sigma_Q_pump, self._rng)  # noqa: F841
 
-        # ── 6. 沉砂水阀（操作员间歇调整 + 执行机构跟踪）────────────────
-        t_sec = t * dt
-        if t_sec - self._t_last_adj >= cfg.T_adj_sand:
-            adj = self._rng.normal(0.0, cfg.sigma_sand_adj)
-            self._u_sand_sp = float(np.clip(cfg.u_sand_mean + adj, 0.0, 1.0))
-            self._t_last_adj = t_sec
-        tau_act = max(cfg.tau_act_sand, dt)
-        self._u_sand_fb += (dt / tau_act) * (self._u_sand_sp - self._u_sand_fb)
-        u_sand_fb_dcs = add_noise(self._u_sand_fb, cfg.sigma_u_sand_fb, self._rng)
-        u_sand_fb_dcs = float(np.clip(u_sand_fb_dcs, 0.0, 1.0))
-
-        Q_sand_water = cfg.C_v_sand * self._u_sand_fb * math.sqrt(max(d4_kpa, 0.0))
-        Q_sand_water = max(Q_sand_water, 0.0)
-        Q_sand_water_dcs = add_noise(Q_sand_water, cfg.sigma_Q_sand_water, self._rng)
-
-        # ── 7. 轴承温度（ZOH + 故障注入）────────────────────────────
+        # ── 8. 轴承温度（ZOH + 故障注入）────────────────────────────
         T_ss_b1 = cfg.T_amb + cfg.k_b1_kw * P_mech
         self._T_b1 = _zoh_step(self._T_b1, T_ss_b1, cfg.tau_b1, dt)
         T_b1_dcs = inject_fault(
@@ -293,7 +299,7 @@ class TowerMillSystem:
             self._rng,
         )
 
-        # ── 8. 定子温度（ZOH + 故障注入）────────────────────────────
+        # ── 9. 定子温度（ZOH + 故障注入）────────────────────────────
         T_ss_sA = cfg.T_coolant + cfg.k_sA_a2 * I_motor ** 2
         self._T_sA = _zoh_step(self._T_sA, T_ss_sA, cfg.tau_sA, dt)
         T_sA_dcs = inject_fault(
@@ -310,7 +316,7 @@ class TowerMillSystem:
             self._rng,
         )
 
-        # ── 9. 减速机温度（ZOH）──────────────────────────────────────
+        # ── 10. 减速机温度（ZOH）──────────────────────────────────────
         P_loss_kw = P_mech * (1.0 - cfg.eta_red) / cfg.eta_red
         T_ss_red = cfg.T_amb + cfg.k_red_kw * P_loss_kw
         self._T_red = _zoh_step(self._T_red, T_ss_red, cfg.tau_red, dt)
@@ -318,14 +324,14 @@ class TowerMillSystem:
         T_red_out = cfg.alpha_pipe * self._T_red + (1.0 - cfg.alpha_pipe) * cfg.T_amb
         T_red_out_dcs = add_noise(T_red_out, cfg.sigma_red_out, self._rng)
 
-        # ── 10. 溢流泵池液位 ODE ─────────────────────────────────────
+        # ── 11. 溢流泵池液位 ODE ─────────────────────────────────────
         Q_ov_pump = cfg.Q_ov_pump_nom if self._L_ov > cfg.L_ov_low else 0.0
         dL_ov = (Q_ov - Q_ov_pump) / cfg.A_ov
         self._L_ov += dL_ov * dt
         self._L_ov = float(np.clip(self._L_ov, 0.0, 5.0))
         L_ov_dcs = add_noise(self._L_ov, cfg.sigma_L_ov, self._rng)
 
-        # ── 11. 溢流泵电流 ────────────────────────────────────────────
+        # ── 12. 溢流泵电流 ────────────────────────────────────────────
         pump_on = 1.0 if self._L_ov > cfg.L_ov_low else 0.0
         I_ov_pump = (
             cfg.I_ov_0 * pump_on
@@ -334,7 +340,7 @@ class TowerMillSystem:
         I_ov_pump_dcs = add_noise(I_ov_pump, cfg.sigma_I_ov, self._rng)
 
         # ── 溢流质量流量 & 品位（供下游浮选段使用）───────────────────
-        m_ov = Q_ov * cfg.rho_slurry_nom * 3600.0 / 1000.0   # t/h（湿态）
+        m_ov = Q_ov * cfg.rho_ov * 3600.0 / 1000.0   # t/h（湿态，溢流密度 ~14.93%）
         g_ov = g_mag_delayed                                   # 品位不随研磨变化
 
         # ── 写入 bus（DCS 可观测量）───────────────────────────────────

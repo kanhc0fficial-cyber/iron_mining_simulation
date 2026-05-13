@@ -1,7 +1,7 @@
 # 浮选段与最终精矿品位重新设计
 
 版本：v0.1  
-范围：浮选前浓缩、加药、pH、粗选、精选、三段扫选、泡沫、泵池、电气变量、最终精矿和浮选过程化验。
+范围：新1#、新2#浮选系统的浮选前浓缩、加药、pH、粗选、精选、三段扫选、泡沫、泵池、电气变量、最终精矿和浮选过程化验。老浮选系统不进入本段机理仿真；若存在公用上游或公用药剂/水系统影响，只作为边界扰动或公用资源状态处理。
 
 ## 现有问题
 
@@ -65,13 +65,14 @@ difficulty = w_carb*r_carb + w_sil*r_sil + w_coarse*(1-F325_feed) + w_lowlib*(1-
 ```text
 1. 读取塔磨溢流延迟量 TMOverflow_delayed
 2. 更新浮选前浓缩机水固平衡，得到浮选给矿
-3. 按系列分配给矿量和组分
+3. 按新1#、新2#系列分配给矿量和组分
 4. 根据给矿量、药剂泵频率计算各药剂 g/t 单耗
 5. 更新 pH、气量、液位、泡沫和泵池状态
 6. 用上一时刻回流量组成 rougher_feed
 7. 依次计算粗选、精选、一扫、二扫、三扫组分分配
 8. 将本步回流写入回流缓冲，精选泡沫作为最终精矿
-9. 生成 DCS、过程化验和 `y_fx_xin1/2`
+9. 生成系列/段级传感器状态
+10. 由 `DCSOutputAdapter` 生成 DCS 输出列、过程化验和 `y_fx_xin1/2`
 ```
 
 每个系列状态：
@@ -319,6 +320,34 @@ Q_pump_pool = k_pump*f_pump*sqrt(max(L_pool,0))*(1-k_cav*cavitation)
 ## DCS 变量生成公式
 
 浮选 DCS 变量不得从 `TFe_conc`、`y_fx_xin` 或任何过程化验品位反推。下列公式给出第一版可实现口径。
+
+新增聚合口径：浮选内部不提前把新1#和新2#聚合，也不把槽段状态提前压成一个全厂 `agg_fx_*`。每个新系列先维护自己的浓缩、药剂、气量、液位、泡沫、泵池和段级组分状态；最终 DCS 列由 `DCSOutputAdapter` 输出。
+
+推荐内部状态：
+
+```text
+series[s in {new1,new2}].feed_thickener
+series[s].reagent_pump[NaOH, DF_K6, CaO, TD_rougher, TD_cleaner]
+series[s].stage[rougher, cleaner, scav1, scav2, scav3]
+series[s].sump[]
+series[s].final_conc
+series[s].final_tail
+```
+
+推荐输出适配：
+
+```text
+DCSOutputAdapter:
+  fx_new1_feed_flow, fx_new2_feed_flow
+  fx_new1_ph, fx_new2_ph
+  fx_new1_naoh_pump_flow, fx_new2_naoh_pump_flow
+  fx_new1_df_k6_pump_flow, fx_new2_df_k6_pump_flow
+  fx_new1_cao_pump_flow, fx_new2_cao_pump_flow
+  fx_new1_td_rougher_pump_flow, fx_new2_td_rougher_pump_flow
+  fx_new1_td_cleaner_pump_flow, fx_new2_td_cleaner_pump_flow
+```
+
+具体是否再输出某些 `agg_fx_*` 兼容列，由输出适配层配置，不进入浮选速率公式。
 
 ### 加药系统
 

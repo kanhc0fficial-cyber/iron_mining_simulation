@@ -47,6 +47,14 @@ def parse_args() -> argparse.Namespace:
         "--open-loop", action="store_true",
         help="开环激励模式（PRBS 加药 + 扩大扰动方差）",
     )
+    parser.add_argument(
+        "--assay-interval-min", type=int, default=None,
+        help="minimum sample interval in simulation steps; overrides FlotationConfig.assay_interval_min",
+    )
+    parser.add_argument(
+        "--assay-interval-max", type=int, default=None,
+        help="maximum sample interval in simulation steps; overrides FlotationConfig.assay_interval_max",
+    )
     return parser.parse_args()
 
 
@@ -58,6 +66,12 @@ def main() -> None:
     ball_cfg = BallMillConfig()
     mag_cfg = MagSepConfig()
     flo_cfg = FlotationConfig()
+    if args.assay_interval_min is not None:
+        flo_cfg.assay_interval_min = args.assay_interval_min
+    if args.assay_interval_max is not None:
+        flo_cfg.assay_interval_max = args.assay_interval_max
+    if flo_cfg.assay_interval_min <= 0 or flo_cfg.assay_interval_max < flo_cfg.assay_interval_min:
+        raise ValueError("assay interval must satisfy 0 < min <= max")
 
     sim = Simulator(
         sim_cfg=sim_cfg,

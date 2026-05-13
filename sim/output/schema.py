@@ -12,6 +12,8 @@ OUTPUT_COLUMNS  : 当前激活的输出列（由 Simulator 根据构建阶段选
 
 from __future__ import annotations
 
+from sim.layers.boundary import BOUNDARY_LAB_COLUMNS
+
 # ── 第一步：磁选段 12 个 DCS 变量 ───────────────────────────────────────────
 STEP1_COLUMNS: list[str] = [
     "agg_mag_excit_voltage",          # 励磁电压 (V)
@@ -129,5 +131,8 @@ STEP3_COLUMNS += ["fx_s1_k6_level", "fx_s2_k6_level"]
 # 目标变量（2 个：精矿 TFe 化验值）
 STEP3_COLUMNS += ["y_fx_xin1", "y_fx_xin2"]
 
+# ── 阶段 1：入口过程化验（非 DCS 在线特征，采样时刻以外允许 NaN）────────────
+PROCESS_LAB_COLUMNS: list[str] = BOUNDARY_LAB_COLUMNS
+
 # ── 当前激活输出列（第一步仅含磁选段）──────────────────────────────────────
-OUTPUT_COLUMNS: list[str] = STEP1_COLUMNS + STEP2_COLUMNS + STEP3_COLUMNS
+OUTPUT_COLUMNS: list[str] = STEP1_COLUMNS + STEP2_COLUMNS + PROCESS_LAB_COLUMNS + STEP3_COLUMNS

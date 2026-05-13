@@ -96,6 +96,138 @@ class BallMillConfig:
 
 
 @dataclass
+class BoundaryConfig:
+    """入口边界发生器参数（三路线二溢/弱磁给矿等价边界）。
+
+    第一阶段保留旧 `_x_d1/_x_m_ball/_x_d80_ball` 等隐藏字段，供下游
+    现有磁选、塔磨、浮选模块继续运行；新增三路线内部状态和入口化验列。
+    """
+
+    # ── 时间和矿石块慢变 ───────────────────────────────────────────────
+    dt: int = 60
+    tau_blend_s: float = 6 * 3600.0
+    p_block_switch: float = 0.0015
+
+    # 入口 TFe：默认流程考查/现场主场景 31%-32%
+    tfe_mean: float = 0.3149
+    tfe_sigma: float = 0.00045
+    tfe_block_sigma: float = 0.010
+    tfe_min: float = 0.300
+    tfe_max: float = 0.330
+    tfe_open_sigma_factor: float = 10.0
+
+    # Fe 组分占总铁比例，四项归一化后使用。
+    r_mag_mean: float = 0.765
+    r_hem_mean: float = 0.118
+    r_carb_mean: float = 0.057
+    r_sil_mean: float = 0.060
+    r_component_sigma: float = 0.010
+
+    # 兼容旧 _x_d3：1 附近的可磨性/难磨性代理，当前下游按旧口径读取。
+    wi_mean: float = 1.0
+    wi_sigma: float = 0.004
+    wi_block_sigma: float = 0.05
+    wi_min: float = 0.8
+    wi_max: float = 1.2
+
+    clay_mean: float = 0.08
+    clay_sigma: float = 0.003
+    clay_min: float = 0.02
+    clay_max: float = 0.18
+
+    # 公用水压，兼容旧 _x_d4。
+    water_pressure_mean: float = 0.40
+    water_pressure_phi: float = 0.99
+    water_pressure_sigma: float = 0.002
+    water_pressure_min: float = 0.30
+    water_pressure_max: float = 0.50
+
+    # ── 三路线入口 ─────────────────────────────────────────────────────
+    n_lines: int = 3
+    line_solid_nom_tph: float = 265.0
+    line_solid_min_tph: float = 240.0
+    line_solid_max_tph: float = 290.0
+    line_flow_phi: float = 0.98
+    line_flow_common_sigma: float = 2.0
+    line_flow_ind_sigma: float = 1.2
+
+    line_conc_mean: float = 0.390
+    line_conc_phi: float = 0.97
+    line_conc_sigma: float = 0.004
+    line_conc_min: float = 0.34
+    line_conc_max: float = 0.42
+    conc_load_coeff: float = 0.015
+
+    # 三路线开停，默认绝大多数时间三线运行，偶发离散台阶。
+    p_line_schedule_switch: float = 0.002
+    p_lines_on_1: float = 0.02
+    p_lines_on_2: float = 0.08
+
+    # 粒度：直接生成 F200，再用 Rosin-Rammler 反算兼容 d80/f325/f25。
+    f200_mean: float = 0.77
+    f200_phi: float = 0.97
+    f200_sigma: float = 0.006
+    f200_min: float = 0.74
+    f200_max: float = 0.83
+    f200_wi_coeff: float = 0.06
+    f200_load_coeff: float = 0.025
+    f200_clay_coeff: float = 0.04
+    rr_n: float = 1.20
+
+    # FeO 代理；输出为质量流，默认不落入 DCS 特征。
+    k_feo_mag: float = 0.33
+    k_feo_carb: float = 0.46
+    k_feo_hem: float = 0.05
+    k_feo_sil: float = 0.12
+
+    # 入口过程化验采样，按设计默认 30-60 min。
+    lab_interval_min_steps: int = 30
+    lab_interval_max_steps: int = 60
+    lab_sigma_tfe_pct: float = 0.12
+    lab_sigma_f200_pct: float = 0.35
+
+    @classmethod
+    def from_legacy(
+        cls,
+        dist_cfg: DisturbanceConfig,
+        ball_cfg: BallMillConfig,
+        *,
+        dt: int = 60,
+    ) -> "BoundaryConfig":
+        """从旧扰动层和球磨边界配置构造第一阶段入口边界配置。"""
+        return cls(
+            dt=dt,
+            tfe_mean=dist_cfg.d1_mean,
+            tfe_sigma=dist_cfg.d1_sigma,
+            tfe_min=max(dist_cfg.d1_min, 0.25),
+            tfe_max=min(dist_cfg.d1_max, 0.38),
+            # 新入口边界的矿石慢变时间常数比旧 d1 OU 更长；开环模式需
+            # 更大的扰动放大，才能保持最终精矿品位均值约 67% 且方差充足。
+            tfe_open_sigma_factor=max(dist_cfg.d1_sigma_open_factor, 17.0),
+            wi_mean=dist_cfg.d3_mean,
+            wi_sigma=dist_cfg.d3_sigma * 0.4,
+            wi_min=dist_cfg.d3_min,
+            wi_max=dist_cfg.d3_max,
+            water_pressure_mean=dist_cfg.d4_mean,
+            water_pressure_phi=dist_cfg.d4_phi,
+            water_pressure_sigma=dist_cfg.d4_sigma,
+            water_pressure_min=dist_cfg.d4_min,
+            water_pressure_max=dist_cfg.d4_max,
+            n_lines=ball_cfg.n_lines,
+            line_solid_nom_tph=ball_cfg.m_ball_mean,
+            line_solid_min_tph=ball_cfg.m_ball_min,
+            line_solid_max_tph=ball_cfg.m_ball_max,
+            line_flow_phi=ball_cfg.m_ball_phi,
+            line_flow_common_sigma=ball_cfg.m_ball_sigma,
+            line_conc_mean=ball_cfg.rho_ball_mean,
+            line_conc_phi=ball_cfg.rho_ball_phi,
+            line_conc_sigma=ball_cfg.rho_ball_sigma,
+            line_conc_min=ball_cfg.rho_ball_min,
+            line_conc_max=ball_cfg.rho_ball_max,
+        )
+
+
+@dataclass
 class MagSepConfig:
     """磁选段参数（弱磁+强磁前浓缩+强磁+扫强磁）。
 
@@ -222,6 +354,23 @@ class MagSepConfig:
     k_pipe: float = 50.0              # kPa·h²/m⁶，管路阻力系数（近似）
     Q_flush: float = 0.01             # m³/s，冲矿水量（操作员设定）
     sigma_P_flush: float = 0.002      # MPa，压力测量噪声
+
+    # ── 聚合 DCS 的设备拓扑──────────────────────────────────────────────
+    # 工厂报告显示强磁、扫强磁是两组独立设备；公共 agg_* 列保留为
+    # “运行设备加权聚合”，同时输出 hm_/sw_ 分段诊断列。
+    n_wm_units: int = 12
+    n_hm_units: int = 10
+    n_sw_units: int = 10
+    hm_units_min: int = 2
+    hm_units_max: int = 6
+    sw_units_min: int = 2
+    sw_units_max: int = 6
+    wm_units_min: int = 3
+    wm_units_max: int = 11
+    hm_current_factor: float = 1.00
+    sw_current_factor: float = 0.95
+    unit_cv_electrical: float = 0.025
+    unit_cv_mechanical: float = 0.050
 
 
 @dataclass
@@ -398,6 +547,17 @@ class TowerMillConfig:
     rho_ov: float = 1120.0            # kg/m³，溢流密度（~14.93%）
     sigma_I_ov: float = 0.30          # A
 
+    # ── 聚合 DCS 的设备拓扑──────────────────────────────────────────────
+    n_tm_units: int = 6
+    n_cyclone_trains: int = 6
+    tm_units_min: int = 2
+    tm_units_max: int = 6
+    cyclone_trains_min: int = 4
+    cyclone_trains_max: int = 12
+    train_cv_flow: float = 0.08
+    train_cv_current: float = 0.06
+    train_cv_level: float = 0.04
+
 
 @dataclass
 class FlotationConfig:
@@ -545,5 +705,5 @@ class FlotationConfig:
     lab_buf_capacity: int = 300       # RingBuffer 容量（步）
     sigma_lab: float = 0.0012         # TFe 化验噪声（小数单位，≈0.12%）
     delta_12: float = 0.002           # 第2系列品位偏置（+0.2%）
-    assay_interval_min: int = 240     # 步，化验最小间隔（4 h）
-    assay_interval_max: int = 480     # 步，化验最大间隔（8 h）
+    assay_interval_min: int = 120     # 步，采样最小间隔（2 h）；y 按采样时刻对齐写入
+    assay_interval_max: int = 240     # 步，采样最大间隔（4 h）；化验报出时滞仅用于在线可用性语义

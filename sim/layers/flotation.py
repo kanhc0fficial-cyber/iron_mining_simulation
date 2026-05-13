@@ -414,18 +414,21 @@ class FlotationSystem:
         ])
         P_AH = np.clip(P_AH, 100.0, 5000.0)
 
-        # ── 13. 化验时滞（LabAssayer）────────────────────────────────
+        # 13. Sample-aligned assay labels.
+        #
+        # y_fx_xin1/2 are supervised-learning targets, so they are written at
+        # the sample collection time. The lab delay still describes when the
+        # value would be available in an online system, but storing the target
+        # at report time misaligns y with the process features that generated it.
         for s in range(_N_SERIES):
-            # 将当前 TFe 推入缓冲区
             self._lab_buf[s].push(self._TFe_circuit[s] + self._delta_12[s])
-            # 倒计时
             self._steps_to_assay[s] -= 1
             if self._steps_to_assay[s] <= 0:
-                # 读取 tau_lab 步前的 TFe（化验延迟）
-                delay = int(np.clip(self._tau_lab[s], 0, cfg.lab_buf_capacity - 1))
-                tfe_delayed = self._lab_buf[s].peek(delay)
-                self._y_fx[s] = tfe_delayed + rng.normal(0, cfg.sigma_lab)
-                # 安排下次化验
+                self._y_fx[s] = (
+                    self._TFe_circuit[s]
+                    + self._delta_12[s]
+                    + rng.normal(0, cfg.sigma_lab)
+                )
                 self._steps_to_assay[s] = int(rng.integers(
                     cfg.assay_interval_min, cfg.assay_interval_max + 1
                 ))
@@ -435,8 +438,7 @@ class FlotationSystem:
             else:
                 self._y_fx[s] = float("nan")
 
-        # ── 14. 写入 bus（按 STEP3_COLUMNS 顺序）─────────────────────
-        # 浓缩机
+        # 14. Write bus values in STEP3 column order.
         bus["fx_nt1_motor_current"] = float(I_NT[0])
         bus["fx_nt2_motor_current"] = float(I_NT[1])
         bus["fx_nt1_underflow_density"] = float(rho_NT_dcs[0])

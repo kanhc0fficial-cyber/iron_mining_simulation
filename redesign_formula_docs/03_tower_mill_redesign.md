@@ -273,6 +273,40 @@ lab_tm_sand_f325
 
 塔磨 DCS 不从 `_x_g_ov` 或最终精矿品位反推。它们由流量、液位、浓度、压力、功率、负荷、温度状态生成。
 
+新增聚合口径：塔磨内部不读取 `agg_tm_*`。三次分级旋流器组、给矿泵池、溢流泵池、塔磨机组先分别维护状态；最终 `agg_tm_*` 只由 `DCSOutputAdapter` 输出。这样避免把“开几组旋流器、每组负荷多少、哪台塔磨偏热”提前平均掉。
+
+推荐内部状态：
+
+```text
+train[k].is_on
+train[k].Q_feed
+train[k].P_feed
+train[k].C_feed
+train[k].pool_level
+train[k].pump_current
+train[k].sand_water_flow
+
+tm_unit[i].is_on
+tm_unit[i].P_mech
+tm_unit[i].motor_current
+tm_unit[i].bearing_temp
+tm_unit[i].reducer_temp
+```
+
+推荐输出适配：
+
+```text
+DCSOutputAdapter:
+  agg_tm_cyclone_feed_flow
+  agg_tm_cyclone_pump_current
+  agg_tm_motor_current
+  agg_tm_cyclone_pool_level
+  tm_units_on
+  tm_cyclone_trains_on
+```
+
+具体聚合方式先不在机理文档中定死；输出适配层可按真实 DCS 口径或建模实验需要配置。
+
 ### 给矿泵池与旋流器
 
 ```text
@@ -335,7 +369,7 @@ tm_overflow_pool_level = L_ov + N(0,sigma_L_ov)
 tm_overflow_pump_current = I_ov0*1[L_ov>L_ov_low] + k_ov_Q*Q_ov_pump*rho_over + N(0,sigma_I_ov)
 ```
 
-如果现有代码列名是 `agg_tm_*`，实现时只需把上面的语义变量映射回现有列名，例如：
+如果现有代码列名是 `agg_tm_*`，实现时只需在输出适配层把上面的语义变量映射回现有列名，例如：
 
 ```text
 agg_tm_cyclone_feed_flow      <- tm_cyclone_feed_flow
@@ -346,3 +380,5 @@ agg_tm_motor_current          <- tm_motor_current
 ## 泄漏约束
 
 塔磨 DCS 变量如泵池液位、泵频、给矿压力、塔磨功率和电流可以通过负荷、粒度和浓度与最终品位相关，但不得由浮选精矿品位或 `_x_g_ov` 反向生成。
+
+同时，`agg_tm_*` 不应回流进入塔磨闭路公式。闭路公式读取 `train[k]`、`tm_unit[i]`、`pool` 等内部状态；`agg_tm_*` 只用于最终输出和软测量训练。

@@ -68,13 +68,13 @@ MagOut = {
   hm_feed, hm_conc, hm_tail,
   sw_conc, sw_tail,
   mixed_conc,
-  DCS_mag
+  states_mag
 }
 
 TMOut = {
   cyclone_overflow, cyclone_sand, tm_discharge,
   F325_over, liberation_over,
-  DCS_tm
+  states_tm
 }
 
 FloOut = {
@@ -85,7 +85,7 @@ FloOut = {
   scav2_conc, scav2_tail,
   scav3_conc, final_tail,
   y_fx_xin1, y_fx_xin2,
-  DCS_flo
+  states_flo
 }
 ```
 
@@ -114,7 +114,8 @@ TFe = Fe_total / max(M_solid, eps)
 3. TowerMillSystem.step(MagOut.mixed_conc)
 4. FlotationSystem.step(TMOut.cyclone_overflow)
 5. ProcessLabSampler.step(BoundaryOut, MagOut, TMOut, FloOut)
-6. Writer.step(DCS, lab_*, y_*)
+6. DCSOutputAdapter.step(BoundaryOut, MagOut, TMOut, FloOut, lab_*, y_*)
+7. Writer.step(DCSFrame, lab_*, y_*)
 ```
 
 注意：
@@ -122,6 +123,7 @@ TFe = Fe_total / max(M_solid, eps)
 - `ProcessLabSampler` 不延迟报出化验；只按采样时刻写入。
 - 工艺物料本身仍可以有设备停留时间和段间时滞。
 - `lab_*` 默认不作为 DCS 特征。
+- 工艺模块内部不读取最终 `agg_*` 聚合列。`agg_*` 只由 `DCSOutputAdapter` 在输出阶段生成，用于兼容旧列名和训练特征。
 
 ## 入口边界公式
 
@@ -194,7 +196,7 @@ k_grind = k0*(P_mech/M_sand)/WI*E_C*E_load
 d80_discharge = d80_sand*exp(-k_grind*tau_mill)
 ```
 
-DCS 由 `L_pool, f_pump, Q_pump, P_cyc, P_mech, temperatures` 生成，详见 `03_tower_mill_redesign.md`。
+塔磨内部状态由 `L_pool, f_pump, Q_pump, P_cyc, P_mech, temperatures` 等生成。最终 `agg_tm_*` DCS 列由 `DCSOutputAdapter` 读取这些状态后输出，详见 `03_tower_mill_redesign.md` 和 `07_dcs_output_aggregation_draft.md`。
 
 ## 浮选公式主线
 
@@ -229,6 +231,21 @@ y_fx_xin_s = 100*TFe(final_conc_s) + N(0,sigma_lab)
 DCS = sensor(true_equipment_state, drift, noise, optional_fault)
 ```
 
+其中 `true_equipment_state` 必须来自模块内部的设备/系列/段级状态，而不是已经聚合后的 `agg_*` 输出列。推荐的实现分层为：
+
+```text
+Process model:
+  Stream + DeviceGroupState + FlotationSeriesState
+
+Sensor model:
+  sensor(device_state, drift, noise, fault)
+
+DCSOutputAdapter:
+  sensor values -> raw-like DCS columns / agg_* compatibility columns
+```
+
+`DCSOutputAdapter` 是单向的：它读工艺状态并写输出列，不把输出列回写给磁选、塔磨或浮选公式。
+
 允许路径：
 
 ```text
@@ -243,6 +260,26 @@ DCS = sensor(true_equipment_state, drift, noise, optional_fault)
 ```text
 最终品位或过程化验品位
   -> 反推 DCS
+
+最终 agg_* 聚合列
+  -> 回流参与分选、分级、磨矿或浮选公式
+```
+
+因此，在机理公式中应使用：
+
+```text
+hm_unit[i].I_exc
+sw_unit[i].I_exc
+train[k].Q_feed
+fx_series[s].stage[rougher].Q_air
+```
+
+而不是：
+
+```text
+agg_mag_excit_current
+agg_tm_cyclone_feed_flow
+agg_fx_air_flow
 ```
 
 ## 过程化验输出公式

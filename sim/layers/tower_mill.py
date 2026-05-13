@@ -26,6 +26,7 @@ import numpy as np
 from sim.config import TowerMillConfig, SimConfig
 from sim.utils.buffer import RingBuffer
 from sim.utils.sensor import add_noise, add_drift, inject_fault
+from sim.utils.aggregation import active_mask, aggregate_active, write_aggregate
 
 _SQRT3 = math.sqrt(3.0)
 
@@ -117,6 +118,12 @@ class TowerMillSystem:
 
         # ── 溢流泵池液位 ODE ──────────────────────────────────────────────
         self._L_ov: float = cfg.L_ov_init
+
+        # ── 设备级聚合偏差 ───────────────────────────────────────────────
+        self._tm_bias = self._rng.normal(0.0, cfg.train_cv_current, cfg.n_tm_units)
+        self._train_flow_bias = self._rng.normal(0.0, cfg.train_cv_flow, cfg.n_cyclone_trains)
+        self._train_current_bias = self._rng.normal(0.0, cfg.train_cv_current, cfg.n_cyclone_trains)
+        self._train_level_bias = self._rng.normal(0.0, cfg.train_cv_level, cfg.n_cyclone_trains)
 
     # ────────────────────────────────────────────────────────────────────
     # 主步进函数
@@ -344,23 +351,40 @@ class TowerMillSystem:
         g_ov = g_mag_delayed                                   # 品位不随研磨变化
 
         # ── 写入 bus（DCS 可观测量）───────────────────────────────────
-        bus["agg_tm_cyclone_pool_level"] = L_pool_dcs
+        load_ratio = float(np.clip(Q_pump / max(cfg.k_pump * cfg.f_pump_nom * math.sqrt(max(cfg.L_pool_setpoint, 0.01)), 1e-9), 0.0, 1.8))
+        tm_on = int(np.clip(round(cfg.n_tm_units * load_ratio), cfg.tm_units_min, cfg.tm_units_max))
+        train_on = int(np.clip(round(cfg.n_cyclone_trains * load_ratio), cfg.cyclone_trains_min, cfg.n_cyclone_trains))
+        tm_active = active_mask(cfg.n_tm_units, tm_on)
+        train_active = active_mask(cfg.n_cyclone_trains, train_on)
+
+        train_feed_flow = Q_cyc_feed_dcs * (1.0 + self._train_flow_bias)
+        train_pump_current = I_pump_dcs * (1.0 + self._train_current_bias)
+        train_pool_level = L_pool_dcs * (1.0 + self._train_level_bias)
+        train_ov_level = L_ov_dcs * (1.0 + self._train_level_bias)
+        train_sand_water = Q_sand_water_dcs * (1.0 + self._train_flow_bias)
+        tm_motor_current = I_motor_dcs * (1.0 + self._tm_bias)
+        tm_reducer_temp = T_red_dcs + 5.0 * self._tm_bias
+        tm_reducer_out = T_red_out_dcs + 4.0 * self._tm_bias
+
+        bus["tm_units_on"] = tm_on
+        bus["tm_cyclone_trains_on"] = train_on
+        write_aggregate(bus, "agg_tm_cyclone_pool_level", aggregate_active(train_pool_level, train_active))
         bus["agg_tm_cyclone_pool_valve_setpoint"] = u_pool_sp
         bus["MC1_FET503_AI"] = Q_pool_water
-        bus["agg_tm_cyclone_feed_flow"] = Q_cyc_feed_dcs
+        write_aggregate(bus, "agg_tm_cyclone_feed_flow", aggregate_active(train_feed_flow, train_active))
         bus["agg_tm_cyclone_pump_freq"] = f_pump_dcs
-        bus["agg_tm_cyclone_pump_current"] = I_pump_dcs
+        write_aggregate(bus, "agg_tm_cyclone_pump_current", aggregate_active(train_pump_current, train_active))
         bus["agg_tm_cyclone_sand_valve_setpoint"] = self._u_sand_sp
         bus["agg_tm_cyclone_sand_valve_feedback"] = u_sand_fb_dcs
-        bus["agg_tm_cyclone_sand_water_flow"] = Q_sand_water_dcs
-        bus["agg_tm_motor_current"] = I_motor_dcs
+        write_aggregate(bus, "agg_tm_cyclone_sand_water_flow", aggregate_active(train_sand_water, train_active))
+        write_aggregate(bus, "agg_tm_motor_current", aggregate_active(tm_motor_current, tm_active))
         bus["MC1_TM204_HDZC_1_WD_AI"] = T_b1_dcs
         bus["MC1_TM206_HDZC_2_WD_AI"] = T_b2_dcs
         bus["MC1_TM204_ZDJ_DZ_A_WD_AI"] = T_sA_dcs
         bus["MC1_TM206_ZDJ_DZ_B_WD_AI"] = T_sB_dcs
-        bus["agg_tm_reducer_oil_temp"] = T_red_dcs
-        bus["agg_tm_reducer_outlet_temp"] = T_red_out_dcs
-        bus["agg_tm_cyclone_overflow_pool_level"] = L_ov_dcs
+        write_aggregate(bus, "agg_tm_reducer_oil_temp", aggregate_active(tm_reducer_temp, tm_active))
+        write_aggregate(bus, "agg_tm_reducer_outlet_temp", aggregate_active(tm_reducer_out, tm_active))
+        write_aggregate(bus, "agg_tm_cyclone_overflow_pool_level", aggregate_active(train_ov_level, train_active))
         bus["agg_tm_overflow_pump_current"] = I_ov_pump_dcs
 
         # ── 写入 bus（隐藏中间量）────────────────────────────────────

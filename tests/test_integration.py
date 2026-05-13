@@ -3,7 +3,7 @@
 
 验收标准：
   - 30 天完整仿真（43 200 步）运行时间 < 5 min（单核）
-  - 输出 DataFrame 列数 ≥ 200，无缺失列，无 NaN/Inf（除 y_fx_xin1/2 的 NaN）
+  - 输出 DataFrame 列数 ≥ 200，无缺失列，无 NaN/Inf（除 y_fx_xin1/2 和采样型 lab_* 的 NaN）
   - 开环模式：TFe 方差 ≥ 4.0，均值 ∈ [66, 68] %
   - 传感器故障频率与文档一致（轴承 ≈ 0.2 %，泡沫层 ≈ 0.5 %）
 """
@@ -24,7 +24,9 @@ from sim.config import (
     TowerMillConfig, FlotationConfig,
 )
 from sim.simulator import Simulator
-from sim.output.schema import STEP1_COLUMNS, STEP2_COLUMNS, STEP3_COLUMNS, OUTPUT_COLUMNS
+from sim.output.schema import (
+    STEP1_COLUMNS, STEP2_COLUMNS, STEP3_COLUMNS, OUTPUT_COLUMNS, PROCESS_LAB_COLUMNS,
+)
 
 
 # ── 辅助：快速运行仿真并返回 DataFrame ──────────────────────────────────
@@ -85,7 +87,7 @@ class TestShortRun:
         assert not missing, f"缺失列（前5个）：{list(missing)[:5]}"
 
     def test_no_nan_inf_except_targets(self) -> None:
-        target_cols = {"y_fx_xin1", "y_fx_xin2"}
+        target_cols = {"y_fx_xin1", "y_fx_xin2", *PROCESS_LAB_COLUMNS}
         non_target = [c for c in OUTPUT_COLUMNS if c not in target_cols]
         for col in non_target:
             col_data = self.df[col]
@@ -109,7 +111,7 @@ class TestFullRun:
     @pytest.mark.slow
     def test_no_nan_inf_except_targets_full(self) -> None:
         df = _run_sim(n_steps=43_200, open_loop=False, output_path="/tmp/test_full_cl2.parquet")
-        target_cols = {"y_fx_xin1", "y_fx_xin2"}
+        target_cols = {"y_fx_xin1", "y_fx_xin2", *PROCESS_LAB_COLUMNS}
         non_target = [c for c in OUTPUT_COLUMNS if c not in target_cols]
         for col in non_target:
             assert df[col].notna().all(), f"{col} 含 NaN"

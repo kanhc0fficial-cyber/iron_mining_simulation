@@ -287,6 +287,7 @@ class TestTowerMillIntegration:
         from pathlib import Path
         from sim.simulator import Simulator
         from sim.config import SimConfig, DisturbanceConfig, BallMillConfig, MagSepConfig, TowerMillConfig
+        from sim.output.schema import PROCESS_LAB_COLUMNS
 
         fault_cols = {
             "MC1_TM204_HDZC_1_WD_AI",
@@ -296,6 +297,7 @@ class TestTowerMillIntegration:
             # 浮选化验时滞目标变量：化验间隔期内为 NaN（设计如此）
             "y_fx_xin1",
             "y_fx_xin2",
+            *PROCESS_LAB_COLUMNS,
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:

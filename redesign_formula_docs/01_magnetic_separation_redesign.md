@@ -460,6 +460,28 @@ _x_C_mag            = C_mag_product
 
 所有 DCS 变量必须由设备状态、操作量、负荷、传感器误差生成，不得从 `_x_g_mag` 或任何下游品位反推。
 
+新增聚合口径：磁选内部不再把 `agg_mag_*` 当作真实设备。弱磁、强磁、扫强磁先分别维护运行台数和设备组状态；`agg_mag_*` 只在最终 `DCSOutputAdapter` 中作为兼容旧数据列输出。强磁和扫强磁的电流、液位、冲洗水、转环、脉动等状态在机理层必须分开，因为两段给矿性质、浓度窗口和目标不同。
+
+推荐内部状态：
+
+```text
+wm_unit[i].is_on, wm_unit[i].load, wm_unit[i].level
+hm_unit[i].is_on, hm_unit[i].I_exc, hm_unit[i].V_exc, hm_unit[i].T_coil, hm_unit[i].level, hm_unit[i].flush_pressure
+sw_unit[i].is_on, sw_unit[i].I_exc, sw_unit[i].V_exc, sw_unit[i].T_coil, sw_unit[i].level, sw_unit[i].flush_pressure
+```
+
+推荐输出适配：
+
+```text
+DCSOutputAdapter:
+  agg_mag_excit_current      <- compatible aggregate of hm_unit[] and sw_unit[]
+  agg_mag_hm_excit_current   <- hm_unit[] sensors
+  agg_mag_sw_excit_current   <- sw_unit[] sensors
+  wm_units_on, hm_units_on, sw_units_on
+```
+
+具体聚合统计方式可以由输出配置决定；它不影响磁选机理公式。
+
 ### 励磁电压、电流、线圈温度
 
 保留现有电热模型，但将电流设定改为操作策略状态：
@@ -471,12 +493,12 @@ I_exc = V_exc / R_coil
 T_coil = thermal(I_exc^2 * R_coil, T_amb)
 ```
 
-输出：
+输出适配：
 
 ```text
-agg_mag_excit_voltage = V_exc + sensor_noise
-agg_mag_excit_current = I_exc + sensor_noise
-agg_mag_coil_temp = T_coil + sensor_noise
+hm_unit[i].sensor_I_exc = hm_unit[i].I_exc + sensor_noise
+sw_unit[i].sensor_I_exc = sw_unit[i].I_exc + sensor_noise
+DCSOutputAdapter(hm_unit[].sensor_I_exc, sw_unit[].sensor_I_exc) -> agg_mag_* columns
 ```
 
 说明：
@@ -496,12 +518,13 @@ Q_flush = valve_flush * sqrt(max(_x_d4, 0))
 P_flush = _x_d4 - k_pipe*Q_flush^2 - k_nozzle*clog_nozzle
 ```
 
-输出：
+输出适配：
 
 ```text
-agg_mag_ring_freq = f_ring + sensor_noise
-agg_mag_pulsation_freq = f_pul + sensor_noise
-agg_mag_flush_water_pressure = P_flush + sensor_noise
+hm_unit[i].sensor_ring_freq = hm_unit[i].f_ring + sensor_noise
+sw_unit[i].sensor_ring_freq = sw_unit[i].f_ring + sensor_noise
+hm_unit[i].sensor_flush_pressure = hm_unit[i].P_flush + sensor_noise
+sw_unit[i].sensor_flush_pressure = sw_unit[i].P_flush + sensor_noise
 ```
 
 ### 液位、排污和电机电流
@@ -531,13 +554,14 @@ I_motor_rc = I0
 matrix_clog = matrix_clog - k_blow*u_blow*dt + clog_generation*dt
 ```
 
-输出：
+输出适配：
 
 ```text
-agg_mag_level = L_hm + sensor_noise
-agg_mag_blowdown_valve = u_blow + sensor_noise
-agg_mag_motor_current_rc = I_motor_rc + sensor_noise
-agg_mag_motor_voltage_rc = V_grid + sensor_noise
+hm_unit[i].sensor_level = hm_unit[i].L + sensor_noise
+sw_unit[i].sensor_level = sw_unit[i].L + sensor_noise
+hm_unit[i].sensor_motor_current = hm_unit[i].I_motor + sensor_noise
+sw_unit[i].sensor_motor_current = sw_unit[i].I_motor + sensor_noise
+DCSOutputAdapter(...) -> agg_mag_level, agg_mag_motor_current_rc, diagnostic columns
 ```
 
 改动原因：
@@ -577,7 +601,7 @@ Product_stage_delayed = delay_or_ZOH(Product_stage_raw, tau_stage)
 
 后续实现后建议做以下检查：
 
-1. `agg_mag_*` 与 `_x_g_mag` 不能存在同一步直接代数反推关系。允许通过 `I_exc -> B_eff -> recovery -> product grade` 形成相关。
+1. `agg_mag_*` 与 `_x_g_mag` 不能存在同一步直接代数反推关系。允许通过 `hm/sw_unit[i].I_exc -> B_eff -> recovery -> product grade -> DCSOutputAdapter` 形成相关。
 2. 任一 DCS 变量单独预测最终 `y_fx_xin1/2` 的能力不应过高，尤其不应超过“上游品位隐藏状态 + 磁选/塔磨/浮选多变量窗口”的组合模型。
 3. `_x_g_mag` 到 `_x_g_ov`、再到浮选最终精矿品位应有可解释滞后。
 4. 强磁给矿浓度、液位、冲洗水压、电机电流、线圈温度应与 `_x_g_mag` 或后续 `y_fx_xin` 呈弱到中等滞后相关，而不是即时强相关。
@@ -585,7 +609,7 @@ Product_stage_delayed = delay_or_ZOH(Product_stage_raw, tau_stage)
 
 ## 对后续代码实现的接口建议
 
-保持现有接口：
+保持现有输出兼容接口：
 
 ```text
 _x_m_mag
@@ -601,6 +625,8 @@ agg_mag_flush_water_pressure
 agg_mag_motor_current_rc
 agg_mag_motor_voltage_rc
 ```
+
+但这些 `agg_mag_*` 只作为最终输出列，不能作为塔磨、浮选或磁选内部下一步公式的输入。若代码短期仍通过 `bus` 传递，应在命名或注释中标明它们来自输出适配层。
 
 新增隐藏接口建议：
 

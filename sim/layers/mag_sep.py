@@ -19,6 +19,7 @@ from sim.config import MagSepConfig, SimConfig
 from sim.utils.pid import PIDController
 from sim.utils.thermal import FirstOrderThermal
 from sim.utils.sensor import add_noise, add_drift
+from sim.utils.aggregation import active_mask, aggregate_active, write_aggregate
 
 
 def _sigmoid(x: float) -> float:
@@ -111,6 +112,12 @@ class MagSepSystem:
         ))
         self._B_nom: float = cfg.mu0_N_over_l * I_nom_steady
         self._dp_nom: float = cfg.dp_ref * np.sqrt(max(1.0 - cfg.f25_nom, 0.01))
+
+        # ── 设备级聚合偏差：固定设备差异 + 每步公共扰动 ────────────────
+        self._hm_elec_bias = self._rng.normal(0.0, cfg.unit_cv_electrical, cfg.n_hm_units)
+        self._sw_elec_bias = self._rng.normal(0.0, cfg.unit_cv_electrical, cfg.n_sw_units)
+        self._hm_mech_bias = self._rng.normal(0.0, cfg.unit_cv_mechanical, cfg.n_hm_units)
+        self._sw_mech_bias = self._rng.normal(0.0, cfg.unit_cv_mechanical, cfg.n_sw_units)
 
     # ────────────────────────────────────────────────────────────────────
     # 主步进函数
@@ -291,17 +298,52 @@ class MagSepSystem:
         V_motor_dcs = add_noise(V_motor, cfg.sigma_V_motor, self._rng)
 
         # ── 写入 bus（DCS 可观测量）──────────────────────────────────────
-        bus["agg_mag_excit_voltage"] = V_exc_dcs
-        bus["agg_mag_excit_current"] = I_exc_dcs
-        bus["agg_mag_coil_temp"] = T_coil_dcs
+        # ── 14.5 设备级聚合（保留 agg_* 兼容列，但不再假装单台设备）──────
+        # 开台数按负荷离散变化。工厂报告中弱磁 3-11 台，强磁/扫强磁
+        # 各 2-6 台；这里用负荷比例驱动，避免连续噪声伪装离散调度。
+        load_ratio = float(np.clip(m_ball / (265.0 * 3.0), 0.0, 1.5))
+        wm_on = int(np.clip(round(cfg.n_wm_units * load_ratio), cfg.wm_units_min, cfg.wm_units_max))
+        hm_on = int(np.clip(round(cfg.hm_units_max * load_ratio), cfg.hm_units_min, cfg.hm_units_max))
+        sw_on = int(np.clip(round(cfg.sw_units_max * load_ratio), cfg.sw_units_min, cfg.sw_units_max))
+        hm_active = active_mask(cfg.n_hm_units, hm_on)
+        sw_active = active_mask(cfg.n_sw_units, sw_on)
+
+        hm_I = I_exc_dcs * cfg.hm_current_factor * (1.0 + self._hm_elec_bias)
+        sw_I = I_exc_dcs * cfg.sw_current_factor * (1.0 + self._sw_elec_bias)
+        hm_V = V_exc_dcs * (1.0 + 0.5 * self._hm_elec_bias)
+        sw_V = V_exc_dcs * (1.0 + 0.5 * self._sw_elec_bias)
+        hm_T = T_coil_dcs + 6.0 * self._hm_elec_bias
+        sw_T = T_coil_dcs + 6.0 * self._sw_elec_bias
+        hm_motor = I_motor_dcs * (1.0 + self._hm_mech_bias)
+        sw_motor = 0.85 * I_motor_dcs * (1.0 + self._sw_mech_bias)
+        hm_level = L_dcs * (1.0 + 0.4 * self._hm_mech_bias)
+        sw_level = L_dcs * (1.0 + 0.4 * self._sw_mech_bias)
+        hm_ring = f_ring * (1.0 + 0.2 * self._hm_mech_bias)
+        sw_ring = f_ring * (1.0 + 0.2 * self._sw_mech_bias)
+        hm_pul = f_pul * (1.0 + 0.15 * self._hm_mech_bias)
+        sw_pul = f_pul * (1.0 + 0.15 * self._sw_mech_bias)
+
+        hm_I_stats = aggregate_active(hm_I, hm_active)
+        sw_I_stats = aggregate_active(sw_I, sw_active)
+        all_active = np.concatenate([hm_active, sw_active])
+
+        bus["wm_units_on"] = wm_on
+        bus["hm_units_on"] = hm_on
+        bus["sw_units_on"] = sw_on
+        write_aggregate(bus, "hm_mag_excit_current", hm_I_stats)
+        write_aggregate(bus, "sw_mag_excit_current", sw_I_stats)
+        write_aggregate(bus, "agg_mag_excit_current", aggregate_active(np.concatenate([hm_I, sw_I]), all_active))
+        write_aggregate(bus, "agg_mag_excit_voltage", aggregate_active(np.concatenate([hm_V, sw_V]), all_active))
+        write_aggregate(bus, "agg_mag_coil_temp", aggregate_active(np.concatenate([hm_T, sw_T]), all_active))
+        write_aggregate(bus, "agg_mag_level", aggregate_active(np.concatenate([hm_level, sw_level]), all_active))
+        write_aggregate(bus, "agg_mag_ring_freq", aggregate_active(np.concatenate([hm_ring, sw_ring]), all_active))
+        write_aggregate(bus, "agg_mag_pulsation_freq", aggregate_active(np.concatenate([hm_pul, sw_pul]), all_active))
+        write_aggregate(bus, "agg_mag_motor_current_rc", aggregate_active(np.concatenate([hm_motor, sw_motor]), all_active))
+
         bus["agg_mag_tailings_valve1"] = u_v1
         bus["agg_mag_tailings_valve2"] = u_v2
         bus["agg_mag_blowdown_valve"] = u_blow_dcs
-        bus["agg_mag_pulsation_freq"] = f_pul
-        bus["agg_mag_ring_freq"] = f_ring
-        bus["agg_mag_level"] = L_dcs
         bus["agg_mag_flush_water_pressure"] = P_flush_dcs
-        bus["agg_mag_motor_current_rc"] = I_motor_dcs
         bus["agg_mag_motor_voltage_rc"] = V_motor_dcs
 
         # ── 写入 bus（隐藏中间量，供下游使用）───────────────────────────

@@ -9,12 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from sim.config import (
-    SimConfig, DisturbanceConfig, BallMillConfig, MagSepConfig, TowerMillConfig,
+    SimConfig, DisturbanceConfig, BallMillConfig, BoundaryConfig, MagSepConfig, TowerMillConfig,
     FlotationConfig,
 )
 from sim.rng import RNGFactory
-from sim.layers.disturbance import DisturbanceLayer
-from sim.layers.ball_mill import BallMillInput
+from sim.layers.boundary import BoundaryGenerator
 from sim.layers.mag_sep import MagSepSystem
 from sim.layers.tower_mill import TowerMillSystem
 from sim.layers.flotation import FlotationSystem
@@ -28,9 +27,10 @@ class Simulator:
     参数
     ----
     sim_cfg      : 全局仿真控制参数
-    dist_cfg     : 扰动层参数
-    ball_cfg     : 球磨溢流参数
+    dist_cfg     : 旧扰动层参数（用于构造第一阶段 BoundaryConfig）
+    ball_cfg     : 旧球磨溢流参数（用于构造第一阶段 BoundaryConfig）
     mag_cfg      : 磁选段参数
+    boundary_cfg : 入口边界参数（提供时优先使用）
     tm_cfg       : 塔磨段参数（None 时使用默认值）
     flo_cfg      : 浮选段参数（None 时使用默认值）
     output_path  : 输出文件路径
@@ -43,6 +43,7 @@ class Simulator:
         dist_cfg: DisturbanceConfig,
         ball_cfg: BallMillConfig,
         mag_cfg: MagSepConfig,
+        boundary_cfg: BoundaryConfig | None = None,
         tm_cfg: TowerMillConfig | None = None,
         flo_cfg: FlotationConfig | None = None,
         output_path: str | Path = "output/simulation.parquet",
@@ -51,10 +52,12 @@ class Simulator:
         self._sim_cfg = sim_cfg
         rng_factory = RNGFactory(sim_cfg.seed)
 
-        self._disturbance = DisturbanceLayer(
-            dist_cfg, rng_factory.get("dist"), open_loop=sim_cfg.open_loop
+        boundary_cfg = boundary_cfg if boundary_cfg is not None else BoundaryConfig.from_legacy(
+            dist_cfg, ball_cfg, dt=sim_cfg.dt
         )
-        self._ball_mill = BallMillInput(ball_cfg, rng_factory.get("ball"))
+        self._boundary = BoundaryGenerator(
+            boundary_cfg, sim_cfg, rng_factory.get("boundary"), open_loop=sim_cfg.open_loop
+        )
         self._mag_sep = MagSepSystem(mag_cfg, sim_cfg, rng_factory.get("mag"))
         self._tower_mill = TowerMillSystem(
             tm_cfg if tm_cfg is not None else TowerMillConfig(),
@@ -95,8 +98,7 @@ class Simulator:
         bus.clear()
         bus["t"] = t
 
-        self._disturbance.step(bus)        # 写 _x_d1~d4
-        self._ball_mill.step(bus)          # 写 _x_m_ball, _x_d80_ball …
+        self._boundary.step(bus, t)        # 写入口边界、旧 _x_* 兼容字段和 lab_1/2/3_eryi_*
         self._mag_sep.step(bus, t)         # 写磁选 DCS 变量 + _x_g_mag, _x_m_mag
         self._tower_mill.step(bus, t)      # 写塔磨 DCS 变量 + _x_f325_ov …
         self._flotation.step(bus, t)       # 写浮选 DCS 变量 + y_fx_xin1/2

@@ -20,8 +20,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sim.config import SimConfig, DisturbanceConfig, BallMillConfig, MagSepConfig, TowerMillConfig
+from sim.config import (
+    SimConfig, DisturbanceConfig, BallMillConfig, BoundaryConfig, MagSepConfig, TowerMillConfig,
+)
 from sim.rng import RNGFactory
+from sim.layers.boundary import BoundaryGenerator
 from sim.layers.disturbance import DisturbanceLayer
 from sim.layers.ball_mill import BallMillInput
 from sim.layers.mag_sep import MagSepSystem
@@ -77,6 +80,25 @@ def run_n_steps(n: int, seed: int = 42) -> list[dict]:
     return history
 
 
+def run_boundary_pipeline_n_steps(n: int, seed: int = 42) -> list[dict]:
+    sim_cfg = SimConfig(seed=seed)
+    rng_factory = RNGFactory(seed)
+    boundary = BoundaryGenerator(BoundaryConfig(), sim_cfg, rng_factory.get("boundary"))
+    mag = MagSepSystem(MagSepConfig(), sim_cfg, rng_factory.get("mag"))
+    tm = TowerMillSystem(TowerMillConfig(), sim_cfg, rng_factory.get("tm"))
+    history = []
+    for t in range(n):
+        bus: dict = {"t": t}
+        boundary.step(bus, t)
+        mag.step(bus, t)
+        tm.step(bus, t)
+        history.append(dict(bus))
+    return history
+
+
+MASS_COMPONENTS = ("fe_mag", "fe_hem", "fe_carb", "fe_sil", "gangue")
+
+
 class TestTowerMillOutputCompleteness:
     def test_all_dcs_columns_present(self):
         history = run_n_steps(10)
@@ -107,6 +129,53 @@ class TestTowerMillOutputCompleteness:
         history = run_n_steps(10)
         for key in ("_x_f325_ov", "_x_m_ov", "_x_g_ov", "_x_P_mech", "_x_alpha_ov"):
             assert key in history[-1], f"{key} 不在 bus 中"
+
+
+class TestTowerMillComponentStreams:
+    def test_component_hidden_streams_present(self):
+        bus = run_boundary_pipeline_n_steps(50)[-1]
+        prefixes = [
+            "_x_tm_cyclone_feed",
+            "_x_tm_cyclone_overflow",
+            "_x_tm_cyclone_sand",
+            "_x_tm_overflow",
+        ]
+        for prefix in prefixes:
+            for suffix in (*MASS_COMPONENTS, "m", "tfe", "f325", "f200", "f25", "d80", "liberation_fe", "liberation_gangue"):
+                key = f"{prefix}_{suffix}"
+                assert key in bus, f"{key} 不在 bus 中"
+
+    def test_cyclone_component_mass_balance(self):
+        bus = run_boundary_pipeline_n_steps(500)[-1]
+        for key in MASS_COMPONENTS:
+            assert math.isclose(
+                bus[f"_x_tm_cyclone_feed_{key}"],
+                bus[f"_x_tm_cyclone_overflow_{key}"] + bus[f"_x_tm_cyclone_sand_{key}"],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            assert math.isclose(
+                bus[f"_x_tm_overflow_{key}"],
+                bus[f"_x_tm_cyclone_overflow_{key}"],
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+
+    def test_legacy_overflow_grade_matches_component_stream(self):
+        bus = run_boundary_pipeline_n_steps(500)[-1]
+        assert math.isclose(bus["_x_g_ov"], bus["_x_tm_overflow_tfe"], abs_tol=1e-12)
+        assert math.isclose(bus["_x_f325_ov"], bus["_x_tm_overflow_f325"], abs_tol=1e-12)
+
+    def test_overflow_liberation_is_not_copied_from_sand(self):
+        history = run_boundary_pipeline_n_steps(700)
+        late = history[400:]
+        overflow_lib = np.mean([bus["_x_tm_cyclone_overflow_liberation_fe"] for bus in late])
+        sand_lib = np.mean([bus["_x_tm_cyclone_sand_liberation_fe"] for bus in late])
+        feed_lib = np.mean([bus["_x_tm_cyclone_feed_liberation_fe"] for bus in late])
+        overflow_f325 = np.mean([bus["_x_tm_overflow_f325"] for bus in late])
+        assert overflow_lib > feed_lib
+        assert overflow_lib > sand_lib + 0.05
+        assert 0.89 <= overflow_f325 <= 0.95
 
 
 class TestTowerMillCalibration:

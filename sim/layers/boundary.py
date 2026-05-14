@@ -136,6 +136,12 @@ class BoundaryGenerator:
             mixed_f25 = _rosin_passing(_X25_M, _d80_from_f200(mixed_f200, cfg.rr_n), cfg.rr_n)
             mixed_d80_mm = _d80_from_f200(mixed_f200, cfg.rr_n) * 1000.0
             fe_carb_abs = cfg.tfe_mean * cfg.r_carb_mean
+            mixed_fe_mag = m_total * cfg.tfe_mean * cfg.r_mag_mean
+            mixed_fe_hem = m_total * cfg.tfe_mean * cfg.r_hem_mean
+            mixed_fe_carb = m_total * cfg.tfe_mean * cfg.r_carb_mean
+            mixed_fe_sil = m_total * cfg.tfe_mean * cfg.r_sil_mean
+            mixed_gangue = max(m_total - m_total * cfg.tfe_mean, 0.0)
+            mixed_feo_proxy = 0.0
         else:
             mixed_tfe = _weighted_average(active_streams, "tfe")
             mixed_c = _weighted_average(active_streams, "concentration")
@@ -144,6 +150,12 @@ class BoundaryGenerator:
             mixed_f25 = _weighted_average(active_streams, "f25")
             mixed_d80_mm = _weighted_average(active_streams, "d80_mm")
             fe_carb_abs = sum(s.fe_carb_tph for s in active_streams) / m_total
+            mixed_fe_mag = sum(s.fe_mag_tph for s in active_streams)
+            mixed_fe_hem = sum(s.fe_hem_tph for s in active_streams)
+            mixed_fe_carb = sum(s.fe_carb_tph for s in active_streams)
+            mixed_fe_sil = sum(s.fe_sil_tph for s in active_streams)
+            mixed_gangue = sum(s.gangue_tph for s in active_streams)
+            mixed_feo_proxy = sum(s.feo_proxy_tph for s in active_streams)
 
         bus["_x_d1"] = float(mixed_tfe)
         bus["_x_d2"] = float(fe_carb_abs)
@@ -158,6 +170,14 @@ class BoundaryGenerator:
         bus["_x_boundary_lines_on"] = int(np.count_nonzero(self._availability))
         bus["_x_boundary_tfe"] = float(mixed_tfe)
         bus["_x_boundary_c"] = float(mixed_c)
+        bus["_x_boundary_fe_mag"] = float(mixed_fe_mag)
+        bus["_x_boundary_fe_hem"] = float(mixed_fe_hem)
+        bus["_x_boundary_fe_carb"] = float(mixed_fe_carb)
+        bus["_x_boundary_fe_sil"] = float(mixed_fe_sil)
+        bus["_x_boundary_gangue"] = float(mixed_gangue)
+        bus["_x_boundary_feo_proxy"] = float(mixed_feo_proxy)
+        bus["_x_boundary_wi"] = float(wi)
+        bus["_x_boundary_clay"] = float(clay)
 
     def _update_ore_state(self) -> None:
         cfg = self._cfg

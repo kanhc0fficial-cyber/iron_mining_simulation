@@ -21,6 +21,23 @@ class SimConfig:
 
 
 @dataclass
+class ProcessLabConfig:
+    """Process-lab sampler parameters for confirmed internal sample points."""
+
+    interval_min_steps: int = 30
+    interval_max_steps: int = 60
+    sigma_tfe_pct: float = 0.16
+    sigma_f325_pct: float = 0.70
+    sigma_conc_pct: float = 0.35
+    sigma_yield_pct: float = 0.50
+    sigma_recovery_pct: float = 0.50
+    tube_yield_base: float = 0.34
+    tube_yield_gain: float = 0.20
+    tube_conc_gain_pct: float = 7.5
+    tube_gangue_penalty_pct: float = 1.2
+
+
+@dataclass
 class DisturbanceConfig:
     """外生扰动过程（OU过程）参数。"""
     # d1: 球磨溢流 TFe 品位（隐藏）
@@ -305,7 +322,24 @@ class MagSepConfig:
     # 标定：g_feed≈0.1274 → g_sweep≈0.3167；k_sw_Si=2.0
     k_sw_Fe: float = 6.82
     k_sw_Si: float = 2.0
-    beta_sweep_Fe: float = 0.55       # 扫强磁铁作业回收率
+    beta_sweep_Fe: float = 0.65       # 扫强磁铁作业回收率
+
+    # ── 阶段 2：组分质量平衡分流──────────────────────────────────────
+    # 选择性向量顺序：Fe_mag, Fe_hem, Fe_carb, Fe_sil。每段先按选择性
+    # 分配目标铁回收量，再由夹带量满足该段品位锚点。
+    wm_component_selectivity: tuple[float, float, float, float] = (1.00, 0.22, 0.05, 0.05)
+    hm_component_selectivity: tuple[float, float, float, float] = (1.00, 0.67, 0.50, 0.48)
+    sw_component_selectivity: tuple[float, float, float, float] = (1.00, 0.64, 0.55, 0.72)
+    wm_gangue_recovery_max: float = 0.35
+    hm_gangue_recovery_max: float = 0.45
+    sw_gangue_recovery_max: float = 0.35
+    hm_actual_concentration: float = 0.303
+    sw_actual_concentration: float = 0.195
+    sw_conc_grade_target: float = 0.31
+    mixed_conc_concentration: float = 0.42
+    liberation_fe_mixed_ref: float = 0.6751
+    liberation_gangue_mixed_ref: float = 0.3743
+    liberation_f200_ref: float = 0.7826
 
     # ── 液位控制（PID + 质量守恒ODE）──────────────────────────────────
     L_setpoint: float = 1.5           # m，液位设定值
@@ -558,6 +592,22 @@ class TowerMillConfig:
     train_cv_current: float = 0.06
     train_cv_level: float = 0.04
 
+    # ── 阶段 3：塔磨/三次分级组分流──────────────────────────────────
+    # 这些参数只用于隐藏 Stream 口径；旧 `_x_m_ov` 仍保留湿态流量兼容语义。
+    mag_fe_mag_frac_nom: float = 0.80
+    mag_fe_hem_frac_nom: float = 0.10
+    mag_fe_carb_frac_nom: float = 0.04
+    mag_fe_sil_frac_nom: float = 0.06
+    f200_mag_nom: float = 0.77
+    f25_mag_nom: float = 0.30
+    liberation_fe_feed_nom: float = 0.6751
+    liberation_gangue_feed_nom: float = 0.3743
+    lib_class_fe_gain: float = 0.18
+    lib_class_gangue_gain: float = 0.42
+    lib_energy_fe_gain: float = 0.020
+    lib_energy_gangue_gain: float = 0.015
+    E_spec_ref: float = 1.5
+
 
 @dataclass
 class FlotationConfig:
@@ -583,6 +633,20 @@ class FlotationConfig:
     g_ov_nom: float = 0.4384          # TFe 品位（小数）
     rho_ov: float = 1120.0            # kg/m³（溢流密度 ~14.93%）
 
+    # Stage-4 component flotation defaults. These are hidden mechanism
+    # parameters; legacy DCS columns keep their existing names and units.
+    feed_fe_mag_frac_nom: float = 0.80
+    feed_fe_hem_frac_nom: float = 0.10
+    feed_fe_carb_frac_nom: float = 0.04
+    feed_fe_sil_frac_nom: float = 0.06
+    flo_feed_f325_nom: float = 0.925
+    flo_feed_f200_nom: float = 0.92
+    flo_feed_f25_nom: float = 0.45
+    tau_flo_pre_thickener: float = 3600.0
+    flo_feed_C_target: float = 0.41
+    flo_feed_C_min: float = 0.38
+    flo_feed_C_max: float = 0.58
+
     # ── 浮选前浓缩机（NT-30，2台）───────────────────────────────────────
     tau_NT: float = 300.0             # s
     rho_NT_target: float = 0.39       # 底流浓度（质量分数）
@@ -602,6 +666,37 @@ class FlotationConfig:
     Q_TD_max: float = 3500.0          # g/t，加药量上限
     tau_flo: float = 800.0            # s，TFe 回路响应时间常数
     k_R_Si_pH: float = 0.02           # pH 对 Si 去除率的影响（/单位pH）
+
+    flo_stage_tau_min: tuple[float, float, float, float, float] = (
+        39.0, 35.0, 28.0, 27.0, 42.0,
+    )
+    flo_stage_gangue_rate_h: tuple[float, float, float, float, float] = (
+        1.20, 0.74, 4.20, 3.50, 2.80,
+    )
+    flo_stage_fe_rate_h: tuple[float, float, float, float, float] = (
+        0.150, 0.100, 2.000, 1.600, 1.200,
+    )
+    flo_recycle_cleaner_tail_frac: float = 0.35
+    flo_recycle_scav1_conc_frac: float = 0.25
+    flo_recycle_scav2_conc_frac: float = 0.35
+    flo_recycle_scav3_conc_frac: float = 0.35
+    flo_sil_float_mult: float = 0.62
+    flo_carb_float_mult: float = 0.48
+    flo_hem_float_mult: float = 1.15
+    flo_mag_float_mult: float = 1.00
+    flo_collector_gain: float = 0.045
+    flo_collector_span: float = 650.0
+    flo_Q_TD_ref: float = 1800.0
+    flo_pH_opt: float = 9.6
+    flo_pH_sigma: float = 1.25
+    flo_C_opt: float = 0.41
+    flo_C_sigma: float = 0.16
+    flo_f325_ref: float = 0.925
+    flo_size_gain: float = 1.35
+    flo_air_gain: float = 0.18
+    flo_froth_fe_weight: float = 0.20
+    flo_tail_grade_nom: float = 0.207
+    sigma_y: float = 0.0
 
     # ── pH 动力学 ─────────────────────────────────────────────────────
     pH_nom: float = 9.6

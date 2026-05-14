@@ -22,6 +22,8 @@ from sim.config import FlotationConfig, SimConfig
 from sim.layers.flotation import FlotationSystem
 from sim.output.schema import STEP3_COLUMNS
 
+MASS_COMPONENTS = ("fe_mag", "fe_hem", "fe_carb", "fe_sil", "gangue")
+
 
 # ── 辅助函数：创建最小化 bus ────────────────────────────────────────────
 def _make_bus(g_ov: float = 0.4384, m_ov: float = 750.0, d2: float = 0.018) -> dict:
@@ -36,11 +38,31 @@ def _make_system(
     Q_TD_nom: float = 1800.0,
     open_loop: bool = False,
     seed: int = 0,
+    **cfg_kwargs,
 ) -> FlotationSystem:
     rng = np.random.default_rng(seed)
-    cfg = FlotationConfig(Q_TD_nom=Q_TD_nom)
+    cfg = FlotationConfig(Q_TD_nom=Q_TD_nom, **cfg_kwargs)
     sim_cfg = SimConfig(open_loop=open_loop)
     return FlotationSystem(cfg, sim_cfg, rng)
+
+
+def _make_tm_component_bus(g_ov: float = 0.4384, m_ov: float = 750.0) -> dict:
+    cfg = FlotationConfig()
+    c_mass_nom = (cfg.rho_ov - 1000.0) / (2700.0 - 1000.0) * (2700.0 / cfg.rho_ov)
+    solid = m_ov * c_mass_nom
+    fe_total = solid * g_ov
+    bus = _make_bus(g_ov=g_ov, m_ov=m_ov)
+    bus.update({
+        "_x_tm_overflow_f325": cfg.flo_feed_f325_nom,
+        "_x_tm_overflow_f200": cfg.flo_feed_f200_nom,
+        "_x_tm_overflow_f25": cfg.flo_feed_f25_nom,
+        "_x_tm_overflow_fe_mag": fe_total * 0.80,
+        "_x_tm_overflow_fe_hem": fe_total * 0.10,
+        "_x_tm_overflow_fe_carb": fe_total * 0.04,
+        "_x_tm_overflow_fe_sil": fe_total * 0.06,
+        "_x_tm_overflow_gangue": solid - fe_total,
+    })
+    return bus
 
 
 # ── 1. 静态标定点（纯公式，无噪声）─────────────────────────────────────
@@ -125,6 +147,62 @@ class TestDynamicConvergence:
 
 
 # ── 3. 输出列完整性 & 有效性 ─────────────────────────────────────────────
+
+class TestComponentFlotation:
+
+    def test_final_product_component_balance(self) -> None:
+        flo = _make_system(seed=31, delay_steps_tm=0)
+        for t in range(650):
+            bus = _make_tm_component_bus()
+            flo.step(bus, t)
+
+        for prefix in ["_x_flo_feed_s1", "_x_flo_final_conc_s1", "_x_flo_final_tail_s1"]:
+            for key in ["m", "tfe", *MASS_COMPONENTS]:
+                assert f"{prefix}_{key}" in bus
+
+        feed_m = bus["_x_flo_feed_s1_m"]
+        product_m = bus["_x_flo_final_conc_s1_m"] + bus["_x_flo_final_tail_s1_m"]
+        assert np.isclose(product_m, feed_m, rtol=0, atol=1e-6)
+
+        feed_fe = sum(
+            bus[f"_x_flo_feed_s1_{key}"] for key in MASS_COMPONENTS if key != "gangue"
+        )
+        product_fe = sum(
+            bus[f"_x_flo_final_conc_s1_{key}"] + bus[f"_x_flo_final_tail_s1_{key}"]
+            for key in MASS_COMPONENTS
+            if key != "gangue"
+        )
+        assert np.isclose(product_fe, feed_fe, rtol=0, atol=1e-6)
+
+    def test_final_grade_and_tail_grade_anchors(self) -> None:
+        flo = _make_system(seed=32, delay_steps_tm=0)
+        for t in range(650):
+            bus = _make_tm_component_bus()
+            flo.step(bus, t)
+
+        assert 0.65 <= bus["_x_flo_final_conc_s1_tfe"] <= 0.69
+        assert 0.17 <= bus["_x_flo_final_tail_s1_tfe"] <= 0.30
+        assert np.isfinite(bus["y_fx_xin1"])
+        assert np.isclose(bus["y_fx_xin1"], bus["_x_TFe_circuit_s1"], atol=1e-12)
+
+    def test_tm_component_grade_changes_final_label(self) -> None:
+        flo = _make_system(
+            seed=33,
+            delay_steps_tm=0,
+            tau_flo_pre_thickener=60.0,
+        )
+        for t in range(120):
+            bus = _make_tm_component_bus(g_ov=0.40)
+            flo.step(bus, t)
+        low_label = bus["_x_TFe_circuit_s1"]
+
+        for t in range(120, 320):
+            bus = _make_tm_component_bus(g_ov=0.48)
+            flo.step(bus, t)
+        high_label = bus["_x_TFe_circuit_s1"]
+
+        assert high_label > low_label + 0.02
+
 
 class TestOutputColumns:
 

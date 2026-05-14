@@ -30,6 +30,101 @@ def _sigmoid(x: float) -> float:
     return ex / (1.0 + ex)
 
 
+_FE_KEYS = ("fe_mag", "fe_hem", "fe_carb", "fe_sil")
+_MASS_KEYS = (*_FE_KEYS, "gangue")
+
+
+def _stream_mass(parts: dict[str, float]) -> float:
+    return float(sum(parts.get(k, 0.0) for k in _MASS_KEYS))
+
+
+def _stream_fe(parts: dict[str, float]) -> float:
+    return float(sum(parts.get(k, 0.0) for k in _FE_KEYS))
+
+
+def _stream_grade(parts: dict[str, float]) -> float:
+    m = _stream_mass(parts)
+    if m <= 1e-9:
+        return 0.0
+    return float(np.clip(_stream_fe(parts) / m, 0.0, 1.0))
+
+
+def _scale_stream(parts: dict[str, float], factor: float) -> dict[str, float]:
+    factor = max(float(factor), 0.0)
+    return {k: max(parts.get(k, 0.0) * factor, 0.0) for k in _MASS_KEYS}
+
+
+def _subtract_stream(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    return {k: max(a.get(k, 0.0) - b.get(k, 0.0), 0.0) for k in _MASS_KEYS}
+
+
+def _merge_streams(*streams: dict[str, float]) -> dict[str, float]:
+    return {k: float(sum(s.get(k, 0.0) for s in streams)) for k in _MASS_KEYS}
+
+
+def _split_by_component_recovery(
+    feed: dict[str, float],
+    fe_recovery: float,
+    grade_target: float,
+    selectivity: tuple[float, float, float, float],
+    gangue_recovery_max: float,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """按组分选择性和目标铁回收率分流，夹带量由品位锚点约束。"""
+    total_fe = _stream_fe(feed)
+    if total_fe <= 1e-9 or _stream_mass(feed) <= 1e-9:
+        empty = {k: 0.0 for k in _MASS_KEYS}
+        return empty.copy(), empty.copy(), {f"R_{k}": 0.0 for k in _MASS_KEYS}
+
+    weights = np.array(selectivity, dtype=float)
+    fe_vec = np.array([feed[k] for k in _FE_KEYS], dtype=float)
+    weighted_fe = float(np.sum(weights * fe_vec))
+    desired_fe = float(np.clip(fe_recovery, 0.0, 0.98) * total_fe)
+    scale = desired_fe / max(weighted_fe, 1e-9)
+    fe_rec = np.clip(weights * scale, 0.0, 0.98)
+
+    conc = {k: float(feed[k] * r) for k, r in zip(_FE_KEYS, fe_rec)}
+    fe_conc = _stream_fe(conc)
+    target = float(np.clip(grade_target, 0.02, 0.90))
+    desired_gangue = max(fe_conc * (1.0 / target - 1.0), 0.0)
+    gangue_feed = max(feed.get("gangue", 0.0), 0.0)
+    gangue_rec = float(np.clip(
+        desired_gangue / max(gangue_feed, 1e-9),
+        0.0,
+        gangue_recovery_max,
+    ))
+    conc["gangue"] = gangue_feed * gangue_rec
+    tail = _subtract_stream(feed, conc)
+
+    recoveries = {f"R_{k}": float(r) for k, r in zip(_FE_KEYS, fe_rec)}
+    recoveries["R_gangue"] = gangue_rec
+    return conc, tail, recoveries
+
+
+def _write_stream_hidden(
+    bus: dict,
+    prefix: str,
+    parts: dict[str, float],
+    concentration: float,
+    f200: float,
+    f325: float,
+    f25: float,
+    d80: float,
+    liberation_fe: float,
+    liberation_gangue: float,
+) -> None:
+    bus[f"{prefix}_m"] = _stream_mass(parts)
+    bus[f"{prefix}_tfe"] = _stream_grade(parts)
+    bus[f"{prefix}_c"] = concentration
+    bus[f"{prefix}_f200"] = f200
+    bus[f"{prefix}_f325"] = f325
+    bus[f"{prefix}_f25"] = f25
+    bus[f"{prefix}_d80"] = d80
+    bus[f"{prefix}_liberation_fe"] = liberation_fe
+    bus[f"{prefix}_liberation_gangue"] = liberation_gangue
+    for key in _MASS_KEYS:
+        bus[f"{prefix}_{key}"] = parts.get(key, 0.0)
+
+
 class MagSepSystem:
     """
     磁选段全部物理计算。
@@ -119,6 +214,33 @@ class MagSepSystem:
         self._hm_mech_bias = self._rng.normal(0.0, cfg.unit_cv_mechanical, cfg.n_hm_units)
         self._sw_mech_bias = self._rng.normal(0.0, cfg.unit_cv_mechanical, cfg.n_sw_units)
 
+    def _feed_stream_from_bus(self, bus: dict) -> dict[str, float]:
+        """读取阶段 1 边界组分；旧测试路径缺字段时按矿石先验回退。"""
+        if all(f"_x_boundary_{k}" in bus for k in _MASS_KEYS):
+            return {k: float(bus[f"_x_boundary_{k}"]) for k in _MASS_KEYS}
+
+        m_solid = float(bus["_x_m_ball"])
+        total_fe = float(np.clip(bus["_x_d1"], 0.0, 1.0) * m_solid)
+        carb_abs = float(np.clip(bus.get("_x_d2", 0.018), 0.0, 0.20))
+        fe_carb = min(carb_abs * m_solid, total_fe * 0.20)
+        fe_sil = min(total_fe * 0.060, max(total_fe - fe_carb, 0.0))
+        fe_hem = min(total_fe * 0.118, max(total_fe - fe_carb - fe_sil, 0.0))
+        fe_mag = max(total_fe - fe_hem - fe_carb - fe_sil, 0.0)
+        return {
+            "fe_mag": fe_mag,
+            "fe_hem": fe_hem,
+            "fe_carb": fe_carb,
+            "fe_sil": fe_sil,
+            "gangue": max(m_solid - total_fe, 0.0),
+        }
+
+    def _liberation_from_size(self, f200: float) -> tuple[float, float]:
+        cfg = self._cfg
+        d = f200 - cfg.liberation_f200_ref
+        lib_fe = np.clip(cfg.liberation_fe_mixed_ref + 0.28 * d, 0.0, 1.0)
+        lib_g = np.clip(cfg.liberation_gangue_mixed_ref + 0.45 * d, 0.0, 1.0)
+        return float(lib_fe), float(lib_g)
+
     # ────────────────────────────────────────────────────────────────────
     # 主步进函数
     # ────────────────────────────────────────────────────────────────────
@@ -132,6 +254,10 @@ class MagSepSystem:
         d1 = bus["_x_d1"]
         d4 = bus["_x_d4"]              # MPa，公共管网水压
         m_ball = bus["_x_m_ball"]      # t/h，三线合计
+        c_feed = bus.get("_x_rho_ball", cfg.hm_actual_concentration)
+        f200 = bus.get("_x_f200_ball", 0.77)
+        f325 = bus.get("_x_f325_ball", 0.55)
+        d80 = bus.get("_x_d80_ball", 0.074)
         f25 = bus["_x_f25_ball"]       # 超细粒含量
 
         # ── 1. 励磁电压（极稳定 AR(1)）──────────────────────────────────
@@ -152,31 +278,34 @@ class MagSepSystem:
         )
         T_coil_dcs = add_noise(T_coil, cfg.sigma_T_coil, self._rng)
 
-        # ── 3. 弱磁选（准静态代数）──────────────────────────────────────
-        g_wmag = d1 * cfg.k_wm_Fe / (1.0 + cfg.k_wm_Si * (1.0 - d1))
-        g_wmag = float(np.clip(g_wmag, 0.0, 1.0))
+        # ── 3. 弱磁选（阶段 2：组分质量平衡分流）────────────────────────
+        feed_parts = self._feed_stream_from_bus(bus)
+        lib_fe, lib_gangue = self._liberation_from_size(float(f200))
+
+        g_wmag_target = d1 * cfg.k_wm_Fe / (1.0 + cfg.k_wm_Si * (1.0 - d1))
+        g_wmag_target = float(np.clip(g_wmag_target, 0.0, 1.0))
         beta_wm = cfg.beta_wm0 * (1.0 - cfg.k_wm_f25 * f25)
         beta_wm = float(np.clip(beta_wm, 0.01, 0.99))
 
-        # 弱磁精矿质量（铁回收率 × 给矿铁量 / 精矿品位）
-        m_Fe_ball = d1 * m_ball
-        if g_wmag > 0.01:
-            m_wm_conc = beta_wm * m_Fe_ball / g_wmag
-        else:
-            m_wm_conc = 0.0
-        m_wm_conc = max(0.0, min(m_wm_conc, m_ball))
-        m_wm_tail = m_ball - m_wm_conc
-
-        # 弱磁尾矿品位（= 强磁给矿品位）
-        if m_wm_tail > 0.01:
-            g_wm_tail = (m_Fe_ball - beta_wm * m_Fe_ball) / m_wm_tail
-        else:
-            g_wm_tail = 0.0
-        g_wm_tail = float(np.clip(g_wm_tail, 0.0, 1.0))
+        wm_conc_parts, wm_tail_parts, wm_rec = _split_by_component_recovery(
+            feed_parts,
+            beta_wm,
+            g_wmag_target,
+            cfg.wm_component_selectivity,
+            cfg.wm_gangue_recovery_max,
+        )
+        m_wm_conc = _stream_mass(wm_conc_parts)
+        m_wm_tail = _stream_mass(wm_tail_parts)
+        g_wm_tail = _stream_grade(wm_tail_parts)
 
         # ── 4. 强磁前浓缩（一阶滞后）────────────────────────────────────
         self._m_conc_out += (dt / cfg.tau_conc) * (m_wm_tail - self._m_conc_out)
         m_conc_out = max(self._m_conc_out, 0.0)
+        hm_feed_parts = _scale_stream(
+            wm_tail_parts,
+            m_conc_out / max(m_wm_tail, 1e-9),
+        )
+        g_hm_feed = _stream_grade(hm_feed_parts)
 
         # ── 5. 操作员设定量：转环频率、脉动频率 ─────────────────────────
         self._xi_f_ring = cfg.phi_ring * self._xi_f_ring + self._rng.normal(0.0, cfg.sigma_ring)
@@ -205,46 +334,42 @@ class MagSepSystem:
         force_balance = max(force_balance, 1e-9)
         beta_strong = _sigmoid(cfg.lambda_s * np.log(force_balance) + cfg.bias_s)
 
-        # ── 7. 强磁精矿品位与质量流 ────────────────────────────────────
-        g_strong = (g_wm_tail * cfg.k_s_Fe
-                    / (1.0 + cfg.k_s_Si * (1.0 - g_wm_tail)))
-        g_strong = float(np.clip(g_strong, g_wm_tail, 1.0))
+        # ── 7. 强磁精矿组分分流 ───────────────────────────────────────
+        g_strong_target = (g_hm_feed * cfg.k_s_Fe
+                           / (1.0 + cfg.k_s_Si * (1.0 - g_hm_feed)))
+        g_strong_target = float(np.clip(g_strong_target, g_hm_feed, 1.0))
+        hm_conc_parts, hm_tail_parts, hm_rec = _split_by_component_recovery(
+            hm_feed_parts,
+            beta_strong,
+            g_strong_target,
+            cfg.hm_component_selectivity,
+            cfg.hm_gangue_recovery_max,
+        )
+        m_strong_conc = _stream_mass(hm_conc_parts)
+        m_strong_tail = _stream_mass(hm_tail_parts)
+        g_strong_tail = _stream_grade(hm_tail_parts)
 
-        if g_strong > 0.01 and m_conc_out > 0.01:
-            m_strong_conc = beta_strong * g_wm_tail * m_conc_out / g_strong
-        else:
-            m_strong_conc = 0.0
-        m_strong_conc = float(np.clip(m_strong_conc, 0.0, m_conc_out))
-        m_strong_tail = m_conc_out - m_strong_conc
-
-        if m_strong_tail > 0.01:
-            m_Fe_tail_strong = g_wm_tail * m_conc_out - g_strong * m_strong_conc
-            g_strong_tail = max(m_Fe_tail_strong / m_strong_tail, 0.0)
-        else:
-            g_strong_tail = 0.0
-
-        # ── 8. 扫强磁精矿品位与质量流 ──────────────────────────────────
-        g_sweep = (g_strong_tail * cfg.k_sw_Fe
-                   / (1.0 + cfg.k_sw_Si * (1.0 - g_strong_tail)))
-        g_sweep = float(np.clip(g_sweep, g_strong_tail, 1.0))
-
-        if g_sweep > 0.01 and m_strong_tail > 0.01:
-            m_sweep_conc = cfg.beta_sweep_Fe * g_strong_tail * m_strong_tail / g_sweep
-        else:
-            m_sweep_conc = 0.0
-        m_sweep_conc = float(np.clip(m_sweep_conc, 0.0, m_strong_tail))
+        # ── 8. 扫强磁精矿组分分流 ──────────────────────────────────────
+        g_sweep_target = (g_strong_tail * cfg.k_sw_Fe
+                          / (1.0 + cfg.k_sw_Si * (1.0 - g_strong_tail)))
+        g_sweep_target = float(np.clip(
+            min(g_sweep_target, cfg.sw_conc_grade_target),
+            g_strong_tail,
+            1.0,
+        ))
+        sw_conc_parts, sw_tail_parts, sw_rec = _split_by_component_recovery(
+            hm_tail_parts,
+            cfg.beta_sweep_Fe,
+            g_sweep_target,
+            cfg.sw_component_selectivity,
+            cfg.sw_gangue_recovery_max,
+        )
+        m_sweep_conc = _stream_mass(sw_conc_parts)
 
         # ── 9. 混磁精矿 ─────────────────────────────────────────────────
-        m_mag = m_wm_conc + m_strong_conc + m_sweep_conc
-        if m_mag > 0.01:
-            g_mag = (
-                g_wmag * m_wm_conc
-                + g_strong * m_strong_conc
-                + g_sweep * m_sweep_conc
-            ) / m_mag
-        else:
-            g_mag = 0.0
-        g_mag = float(np.clip(g_mag, 0.0, 1.0))
+        mixed_parts = _merge_streams(wm_conc_parts, hm_conc_parts, sw_conc_parts)
+        m_mag = _stream_mass(mixed_parts)
+        g_mag = _stream_grade(mixed_parts)
 
         # ── 10. 液位 ODE + PID ──────────────────────────────────────────
         # Q_in：前浓缩底流体积流量（m³/s）
@@ -349,3 +474,54 @@ class MagSepSystem:
         # ── 写入 bus（隐藏中间量，供下游使用）───────────────────────────
         bus["_x_g_mag"] = g_mag
         bus["_x_m_mag"] = m_mag
+        bus["_x_C_mag"] = cfg.mixed_conc_concentration
+        bus["_x_f200_mag"] = f200
+        bus["_x_f325_mag"] = f325
+        bus["_x_f25_mag"] = f25
+        bus["_x_d80_mag"] = d80
+        bus["_x_liberation_fe_mag"] = lib_fe
+        bus["_x_liberation_gangue_mag"] = lib_gangue
+        for key in _MASS_KEYS:
+            bus[f"_x_mag_{key}"] = mixed_parts.get(key, 0.0)
+
+        _write_stream_hidden(
+            bus, "_x_mag_feed", feed_parts, c_feed, f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_wm_conc", wm_conc_parts, c_feed, f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_wm_tail", wm_tail_parts, c_feed, f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_hm_feed", hm_feed_parts, cfg.hm_actual_concentration,
+            f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_hm_conc", hm_conc_parts, cfg.hm_actual_concentration,
+            f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_hm_tail", hm_tail_parts, cfg.hm_actual_concentration,
+            f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_sw_conc", sw_conc_parts, cfg.sw_actual_concentration,
+            f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_sw_tail", sw_tail_parts, cfg.sw_actual_concentration,
+            f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+        _write_stream_hidden(
+            bus, "_x_mag_mixed_conc", mixed_parts, cfg.mixed_conc_concentration,
+            f200, f325, f25, d80, lib_fe, lib_gangue
+        )
+
+        for name, rec in (
+            ("wm", wm_rec),
+            ("hm", hm_rec),
+            ("sw", sw_rec),
+        ):
+            for key, value in rec.items():
+                bus[f"_x_mag_{name}_{key}"] = value

@@ -20,8 +20,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sim.config import SimConfig, DisturbanceConfig, BallMillConfig, MagSepConfig
+from sim.config import SimConfig, DisturbanceConfig, BallMillConfig, BoundaryConfig, MagSepConfig
 from sim.rng import RNGFactory
+from sim.layers.boundary import BoundaryGenerator
 from sim.layers.disturbance import DisturbanceLayer
 from sim.layers.ball_mill import BallMillInput
 from sim.layers.mag_sep import MagSepSystem, _sigmoid
@@ -67,6 +68,27 @@ def run_n_steps(n: int, seed: int = 42) -> list[dict]:
     return history
 
 
+def run_boundary_mag_n_steps(n: int, seed: int = 42) -> list[dict]:
+    sim_cfg = SimConfig(seed=seed)
+    rng_factory = RNGFactory(seed)
+    boundary = BoundaryGenerator(BoundaryConfig(), sim_cfg, rng_factory.get("boundary"))
+    mag = MagSepSystem(MagSepConfig(), sim_cfg, rng_factory.get("mag"))
+    history = []
+    for t in range(n):
+        bus: dict = {"t": t}
+        boundary.step(bus, t)
+        mag.step(bus, t)
+        history.append(dict(bus))
+    return history
+
+
+MASS_COMPONENTS = ("fe_mag", "fe_hem", "fe_carb", "fe_sil", "gangue")
+
+
+def _mass(bus: dict, prefix: str) -> float:
+    return sum(bus[f"{prefix}_{key}"] for key in MASS_COMPONENTS)
+
+
 class TestMagSepOutputCompleteness:
     def test_all_dcs_columns_present(self):
         history = run_n_steps(10)
@@ -85,6 +107,92 @@ class TestMagSepOutputCompleteness:
         history = run_n_steps(10)
         for key in ("_x_g_mag", "_x_m_mag"):
             assert key in history[-1], f"{key} 不在 bus 中"
+
+
+class TestMagSepComponentBalance:
+    def test_component_hidden_states_present(self):
+        bus = run_boundary_mag_n_steps(20)[-1]
+        prefixes = [
+            "_x_mag_feed",
+            "_x_mag_wm_conc",
+            "_x_mag_wm_tail",
+            "_x_mag_hm_feed",
+            "_x_mag_hm_conc",
+            "_x_mag_hm_tail",
+            "_x_mag_sw_conc",
+            "_x_mag_sw_tail",
+            "_x_mag_mixed_conc",
+        ]
+        for prefix in prefixes:
+            for suffix in (*MASS_COMPONENTS, "m", "tfe", "c", "f200", "f325", "f25", "d80"):
+                key = f"{prefix}_{suffix}"
+                assert key in bus, f"{key} 不在 bus 中"
+
+    def test_stage_component_mass_balance(self):
+        bus = run_boundary_mag_n_steps(200)[-1]
+        for key in MASS_COMPONENTS:
+            assert math.isclose(
+                bus[f"_x_mag_feed_{key}"],
+                bus[f"_x_mag_wm_conc_{key}"] + bus[f"_x_mag_wm_tail_{key}"],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            assert math.isclose(
+                bus[f"_x_mag_hm_feed_{key}"],
+                bus[f"_x_mag_hm_conc_{key}"] + bus[f"_x_mag_hm_tail_{key}"],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            assert math.isclose(
+                bus[f"_x_mag_hm_tail_{key}"],
+                bus[f"_x_mag_sw_conc_{key}"] + bus[f"_x_mag_sw_tail_{key}"],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            assert math.isclose(
+                bus[f"_x_mag_mixed_conc_{key}"],
+                bus[f"_x_mag_wm_conc_{key}"] + bus[f"_x_mag_hm_conc_{key}"] + bus[f"_x_mag_sw_conc_{key}"],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+
+    def test_legacy_mixed_fields_match_component_stream(self):
+        bus = run_boundary_mag_n_steps(200)[-1]
+        assert math.isclose(bus["_x_m_mag"], bus["_x_mag_mixed_conc_m"], abs_tol=1e-9)
+        assert math.isclose(bus["_x_g_mag"], bus["_x_mag_mixed_conc_tfe"], abs_tol=1e-12)
+        component_sum = sum(bus[f"_x_mag_{key}"] for key in MASS_COMPONENTS)
+        assert math.isclose(component_sum, bus["_x_m_mag"], abs_tol=1e-9)
+
+    def test_stage_grade_anchors_with_boundary_feed(self):
+        history = run_boundary_mag_n_steps(600)
+        late = history[200:]
+        means = {
+            key: float(np.mean([row[key] for row in late])) * 100.0
+            for key in [
+                "_x_mag_wm_conc_tfe",
+                "_x_mag_wm_tail_tfe",
+                "_x_mag_hm_conc_tfe",
+                "_x_mag_hm_tail_tfe",
+                "_x_mag_sw_conc_tfe",
+                "_x_mag_sw_tail_tfe",
+                "_x_g_mag",
+            ]
+        }
+        assert 50.0 <= means["_x_mag_wm_conc_tfe"] <= 52.5
+        assert 23.0 <= means["_x_mag_wm_tail_tfe"] <= 26.0
+        assert 39.0 <= means["_x_mag_hm_conc_tfe"] <= 42.0
+        assert 14.0 <= means["_x_mag_hm_tail_tfe"] <= 16.0
+        assert 30.0 <= means["_x_mag_sw_conc_tfe"] <= 31.5
+        assert 7.0 <= means["_x_mag_sw_tail_tfe"] <= 8.5
+        assert 43.0 <= means["_x_g_mag"] <= 44.0
+
+    def test_mixed_liberation_and_size_outputs(self):
+        bus = run_boundary_mag_n_steps(50)[-1]
+        assert 0.0 <= bus["_x_liberation_fe_mag"] <= 1.0
+        assert 0.0 <= bus["_x_liberation_gangue_mag"] <= 1.0
+        assert bus["_x_f200_mag"] == bus["_x_mag_mixed_conc_f200"]
+        assert bus["_x_f325_mag"] == bus["_x_mag_mixed_conc_f325"]
+        assert bus["_x_C_mag"] == bus["_x_mag_mixed_conc_c"]
 
 
 class TestMagSepPIDConvergence:

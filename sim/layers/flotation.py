@@ -31,6 +31,10 @@ _N_SERIES = 2   # 系列数
 _N_TANKS = 3    # 每系列搅拌槽数
 _N_POOLS = 3    # 每系列泵池数
 _CELLS = ["cx1", "cx2", "cx3", "jx", "sx1", "sx2", "sx3"]
+_STAGES = ("rougher", "cleaner", "scav1", "scav2", "scav3")
+_FE_KEYS = ("fe_mag", "fe_hem", "fe_carb", "fe_sil")
+_MASS_KEYS = (*_FE_KEYS, "gangue")
+_CELL_TO_STAGE = (0, 0, 0, 1, 2, 3, 4)
 
 
 def _zoh_scalar(x: float, x_ss: float, tau: float, dt: float) -> float:
@@ -42,6 +46,64 @@ def _zoh_arr(x: np.ndarray, x_ss: np.ndarray, tau: float, dt: float) -> np.ndarr
     """ZOH 精确离散化（数组）。"""
     phi = math.exp(-dt / max(tau, 1e-6))
     return x_ss + (x - x_ss) * phi
+
+
+def _stream_mass(parts: dict[str, float]) -> float:
+    return float(sum(parts.get(k, 0.0) for k in _MASS_KEYS))
+
+
+def _stream_fe(parts: dict[str, float]) -> float:
+    return float(sum(parts.get(k, 0.0) for k in _FE_KEYS))
+
+
+def _stream_grade(parts: dict[str, float]) -> float:
+    m = _stream_mass(parts)
+    if m <= 1e-9:
+        return 0.0
+    return float(np.clip(_stream_fe(parts) / m, 0.0, 1.0))
+
+
+def _zero_stream() -> dict[str, float]:
+    return {k: 0.0 for k in _MASS_KEYS}
+
+
+def _scale_stream(parts: dict[str, float], factor: float) -> dict[str, float]:
+    factor = max(float(factor), 0.0)
+    return {k: max(parts.get(k, 0.0) * factor, 0.0) for k in _MASS_KEYS}
+
+
+def _add_streams(*streams: dict[str, float]) -> dict[str, float]:
+    return {
+        k: max(sum(parts.get(k, 0.0) for parts in streams), 0.0)
+        for k in _MASS_KEYS
+    }
+
+
+def _subtract_stream(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    return {k: max(a.get(k, 0.0) - b.get(k, 0.0), 0.0) for k in _MASS_KEYS}
+
+
+def _blend_stream(
+    current: dict[str, float],
+    target: dict[str, float],
+    alpha: float,
+) -> dict[str, float]:
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    return {
+        k: max(
+            current.get(k, 0.0)
+            + alpha * (target.get(k, 0.0) - current.get(k, 0.0)),
+            0.0,
+        )
+        for k in _MASS_KEYS
+    }
+
+
+def _write_stream_hidden(bus: dict, prefix: str, parts: dict[str, float]) -> None:
+    bus[f"{prefix}_m"] = _stream_mass(parts)
+    bus[f"{prefix}_tfe"] = _stream_grade(parts)
+    for key in _MASS_KEYS:
+        bus[f"{prefix}_{key}"] = parts.get(key, 0.0)
 
 
 class FlotationSystem:
@@ -72,6 +134,23 @@ class FlotationSystem:
         cap = cfg.delay_steps_tm + 1
         self._buf_m_ov = RingBuffer(capacity=cap, default=cfg.m_ov_nom)
         self._buf_g_ov = RingBuffer(capacity=cap, default=cfg.g_ov_nom)
+        nominal_parts = self._nominal_feed_stream(cfg.m_ov_nom, cfg.g_ov_nom)
+        self._buf_tm_parts = {
+            key: RingBuffer(capacity=cap, default=nominal_parts[key])
+            for key in _MASS_KEYS
+        }
+        self._buf_tm_f325 = RingBuffer(capacity=cap, default=cfg.flo_feed_f325_nom)
+        self._buf_tm_f200 = RingBuffer(capacity=cap, default=cfg.flo_feed_f200_nom)
+        self._buf_tm_f25 = RingBuffer(capacity=cap, default=cfg.flo_feed_f25_nom)
+        self._flo_feed_parts = [nominal_parts.copy() for _ in range(_N_SERIES)]
+        self._flo_feed_f325 = np.full(_N_SERIES, cfg.flo_feed_f325_nom)
+        self._flo_feed_f200 = np.full(_N_SERIES, cfg.flo_feed_f200_nom)
+        self._flo_feed_f25 = np.full(_N_SERIES, cfg.flo_feed_f25_nom)
+        self._flo_feed_C = np.full(_N_SERIES, cfg.flo_feed_C_target)
+        self._recycle_cleaner_tail = [_zero_stream() for _ in range(_N_SERIES)]
+        self._recycle_scav1_conc = [_zero_stream() for _ in range(_N_SERIES)]
+        self._recycle_scav2_conc = [_zero_stream() for _ in range(_N_SERIES)]
+        self._recycle_scav3_conc = [_zero_stream() for _ in range(_N_SERIES)]
 
         # ── 浮选前浓缩机底流浓度（标量，两系列共用近似值）────────────────
         self._rho_NT = np.full(_N_SERIES, cfg.rho_NT_target, dtype=float)
@@ -164,8 +243,21 @@ class FlotationSystem:
         # ── 1. 段间时滞：推入当前塔磨溢流，读取延迟值 ──────────────────
         self._buf_m_ov.push(bus["_x_m_ov"])
         self._buf_g_ov.push(bus["_x_g_ov"])
+        tm_parts_now = self._tm_stream_from_bus(bus)
+        for key in _MASS_KEYS:
+            self._buf_tm_parts[key].push(tm_parts_now[key])
+        self._buf_tm_f325.push(float(bus.get("_x_tm_overflow_f325", bus.get("_x_f325_ov", cfg.flo_feed_f325_nom))))
+        self._buf_tm_f200.push(float(bus.get("_x_tm_overflow_f200", cfg.flo_feed_f200_nom)))
+        self._buf_tm_f25.push(float(bus.get("_x_tm_overflow_f25", cfg.flo_feed_f25_nom)))
         m_ov_del = self._buf_m_ov.peek(cfg.delay_steps_tm)   # t/h
         g_ov_del = self._buf_g_ov.peek(cfg.delay_steps_tm)   # TFe 品位
+        tm_parts_del = {
+            key: self._buf_tm_parts[key].peek(cfg.delay_steps_tm)
+            for key in _MASS_KEYS
+        }
+        f325_del = self._buf_tm_f325.peek(cfg.delay_steps_tm)
+        f200_del = self._buf_tm_f200.peek(cfg.delay_steps_tm)
+        f25_del = self._buf_tm_f25.peek(cfg.delay_steps_tm)
 
         d2 = bus["_x_d2"]   # 碳酸铁含量（影响 pH）
 
@@ -179,6 +271,32 @@ class FlotationSystem:
         # 固体质量流量（t/h）用于估算电机电流
         c_mass_nom = (cfg.rho_ov - 1000.0) / (2700.0 - 1000.0) * (2700.0 / cfg.rho_ov)
         m_solid_s = m_ov_del * c_mass_nom   # t/h 固体
+        delayed_mass = _stream_mass(tm_parts_del)
+        if delayed_mass <= 1e-9:
+            tm_parts_for_flo = self._nominal_feed_stream(m_ov_del, g_ov_del)
+        else:
+            tm_parts_for_flo = _scale_stream(tm_parts_del, m_solid_s / delayed_mass)
+        alpha_nt = 1.0 - math.exp(-dt / max(cfg.tau_flo_pre_thickener, dt))
+        C_under_target = float(np.clip(
+            cfg.flo_feed_C_target
+            - 0.025 * (m_ov_del / max(cfg.m_ov_nom, 1e-9) - 1.0),
+            cfg.flo_feed_C_min,
+            cfg.flo_feed_C_max,
+        ))
+        for s in range(_N_SERIES):
+            self._flo_feed_parts[s] = _blend_stream(
+                self._flo_feed_parts[s], tm_parts_for_flo, alpha_nt
+            )
+            self._flo_feed_f325[s] += alpha_nt * (f325_del - self._flo_feed_f325[s])
+            self._flo_feed_f200[s] += alpha_nt * (f200_del - self._flo_feed_f200[s])
+            self._flo_feed_f25[s] += alpha_nt * (f25_del - self._flo_feed_f25[s])
+            self._flo_feed_C[s] += alpha_nt * (C_under_target - self._flo_feed_C[s])
+        self._flo_feed_f325 = np.clip(self._flo_feed_f325, 0.0, 1.0)
+        self._flo_feed_f200 = np.clip(self._flo_feed_f200, 0.0, 1.0)
+        self._flo_feed_f25 = np.clip(self._flo_feed_f25, 0.0, 1.0)
+        self._flo_feed_C = np.clip(
+            self._flo_feed_C, cfg.flo_feed_C_min, cfg.flo_feed_C_max
+        )
 
         I_NT = np.array([
             cfg.I_NT0 + cfg.k_NT_I * m_solid_s + rng.normal(0, cfg.sigma_NT_I),
@@ -240,9 +358,9 @@ class FlotationSystem:
         )
         self._pH = np.clip(self._pH, 8.0, 11.5)
 
-        # ── 5. TFe 浮选回路动力学（关键：品位计算）──────────────────
-        TFe_ss = self._tfe_ss_np(self._Q_TD, self._pH, np.full(_N_SERIES, g_ov_del))
-        self._TFe_circuit = TFe_ss + (self._TFe_circuit - TFe_ss) * self._phi_flo
+        # Stage-4 TFe is computed from component flotation after air flow is available.
+        flo_results: list[dict[str, object]] = []
+        hydrophobic_stage_frac = np.zeros((_N_SERIES, len(_STAGES)))
 
         # ── 6. 浮选槽液位 & 泡沫层高度 ──────────────────────────────
         # 串联级联：矿浆全量流过每个槽，首槽入流 = Q_total_s，
@@ -295,15 +413,33 @@ class FlotationSystem:
             + rng.normal(0, cfg.sigma_Q_air_sp, (_N_SERIES, _N_CELLS)),
             Q_air_sp_lo, Q_air_sp_hi,
         )
+
+        stage_air = self._stage_air_from_cells(Q_air)
+        TFe_targets = np.empty(_N_SERIES)
+        for s in range(_N_SERIES):
+            result = self._step_series_circuit(s, stage_air[s])
+            flo_results.append(result)
+            hydrophobic_stage_frac[s, :] = result["hydrophobic_frac"]  # type: ignore[index]
+            TFe_targets[s] = _stream_grade(result["final_conc"])  # type: ignore[arg-type]
+        self._TFe_circuit = (
+            TFe_targets + (self._TFe_circuit - TFe_targets) * self._phi_flo
+        )
         Q_air_sp = np.clip(
             self._Q_air_sp + rng.normal(0, cfg.sigma_Q_air * 0.5, (_N_SERIES, _N_CELLS)),
             Q_air_sp_lo, Q_air_sp_hi,
         )
 
         # 泡沫层高度 ZOH
-        C_Si_approx = np.clip(1.0 - self._TFe_circuit, 0.1, 0.9)[:, None]  # (2,1)
+        hydro_cell_frac = hydrophobic_stage_frac[:, _CELL_TO_STAGE]
+        froth_stability = (
+            1.0
+            + 0.10 * (self._Q_TD[:, None] / max(cfg.Q_TD_nom, 1e-9) - 1.0)
+            + 0.40 * self._flo_feed_f25[:, None]
+            + 0.35 * (self._flo_feed_C[:, None] - cfg.flo_feed_C_target)
+        )
+        froth_stability = np.clip(froth_stability, 0.4, 1.8)
         tau_froth_local = 1.0 / max(cfg.k_col_froth + cfg.k_scrape * cfg.omega_scraper, 1e-6)
-        h_ss = (cfg.k_gen_froth * Q_air * C_Si_approx
+        h_ss = (cfg.k_gen_froth * Q_air * hydro_cell_frac * froth_stability
                 / max(cfg.k_col_froth + cfg.k_scrape * cfg.omega_scraper, 1e-9))
         h_ss = np.clip(h_ss, 0.0, 1.5)
         self._h_froth = _zoh_arr(self._h_froth, h_ss, tau_froth_local, dt)
@@ -414,29 +550,14 @@ class FlotationSystem:
         ])
         P_AH = np.clip(P_AH, 100.0, 5000.0)
 
-        # 13. Sample-aligned assay labels.
-        #
-        # y_fx_xin1/2 are supervised-learning targets, so they are written at
-        # the sample collection time. The lab delay still describes when the
-        # value would be available in an online system, but storing the target
-        # at report time misaligns y with the process features that generated it.
+        # 13. Instant final-concentrate labels.
         for s in range(_N_SERIES):
             self._lab_buf[s].push(self._TFe_circuit[s] + self._delta_12[s])
-            self._steps_to_assay[s] -= 1
-            if self._steps_to_assay[s] <= 0:
-                self._y_fx[s] = (
-                    self._TFe_circuit[s]
-                    + self._delta_12[s]
-                    + rng.normal(0, cfg.sigma_lab)
-                )
-                self._steps_to_assay[s] = int(rng.integers(
-                    cfg.assay_interval_min, cfg.assay_interval_max + 1
-                ))
-                self._tau_lab[s] = int(rng.integers(
-                    cfg.tau_lab_min, cfg.tau_lab_max + 1
-                ))
-            else:
-                self._y_fx[s] = float("nan")
+            self._y_fx[s] = (
+                self._TFe_circuit[s]
+                + self._delta_12[s]
+                + rng.normal(0, cfg.sigma_y)
+            )
 
         # 14. Write bus values in STEP3 column order.
         bus["fx_nt1_motor_current"] = float(I_NT[0])
@@ -522,10 +643,268 @@ class FlotationSystem:
         bus["_x_Q_TD_s1"] = float(self._Q_TD[0])
         bus["_x_Q_TD_s2"] = float(self._Q_TD[1])
         bus["_x_g_ov_del"] = float(g_ov_del)
+        for s, result in enumerate(flo_results):
+            sn = s + 1
+            bus[f"_x_flo_feed_C_s{sn}"] = float(self._flo_feed_C[s])
+            bus[f"_x_flo_feed_f325_s{sn}"] = float(self._flo_feed_f325[s])
+            bus[f"_x_flo_feed_f200_s{sn}"] = float(self._flo_feed_f200[s])
+            bus[f"_x_flo_feed_f25_s{sn}"] = float(self._flo_feed_f25[s])
+            for name in (
+                "feed",
+                "rougher_feed",
+                "rougher_conc",
+                "rougher_tail",
+                "cleaner_conc",
+                "cleaner_tail",
+                "scav1_conc",
+                "scav1_tail",
+                "scav2_conc",
+                "scav2_tail",
+                "scav3_conc",
+                "scav3_tail",
+                "final_tail",
+                "final_conc",
+            ):
+                _write_stream_hidden(
+                    bus,
+                    f"_x_flo_{name}_s{sn}",
+                    result[name],  # type: ignore[arg-type]
+                )
+            for stage_i, stage_name in enumerate(_STAGES):
+                bus[f"_x_flo_{stage_name}_hydrophobic_frac_s{sn}"] = float(
+                    result["hydrophobic_frac"][stage_i]  # type: ignore[index]
+                )
 
     # ─────────────────────────────────────────────────────────────────────
     # 辅助方法
     # ─────────────────────────────────────────────────────────────────────
+
+    def _nominal_feed_stream(self, m_ov: float, g_ov: float) -> dict[str, float]:
+        cfg = self._cfg
+        c_mass_nom = (cfg.rho_ov - 1000.0) / (2700.0 - 1000.0) * (2700.0 / cfg.rho_ov)
+        m_solid = max(float(m_ov) * c_mass_nom, 0.0)
+        fe_total = m_solid * float(np.clip(g_ov, 0.01, 0.99))
+        fracs = np.array([
+            cfg.feed_fe_mag_frac_nom,
+            cfg.feed_fe_hem_frac_nom,
+            cfg.feed_fe_carb_frac_nom,
+            cfg.feed_fe_sil_frac_nom,
+        ], dtype=float)
+        frac_sum = float(fracs.sum())
+        if frac_sum <= 1e-9:
+            fracs = np.array([0.80, 0.10, 0.04, 0.06], dtype=float)
+        else:
+            fracs = fracs / frac_sum
+        return {
+            "fe_mag": fe_total * float(fracs[0]),
+            "fe_hem": fe_total * float(fracs[1]),
+            "fe_carb": fe_total * float(fracs[2]),
+            "fe_sil": fe_total * float(fracs[3]),
+            "gangue": max(m_solid - fe_total, 0.0),
+        }
+
+    def _tm_stream_from_bus(self, bus: dict) -> dict[str, float]:
+        if all(f"_x_tm_overflow_{key}" in bus for key in _MASS_KEYS):
+            parts = {
+                key: max(float(bus.get(f"_x_tm_overflow_{key}", 0.0)), 0.0)
+                for key in _MASS_KEYS
+            }
+            if _stream_mass(parts) > 1e-9:
+                return parts
+        return self._nominal_feed_stream(
+            float(bus.get("_x_m_ov", self._cfg.m_ov_nom)),
+            float(bus.get("_x_g_ov", self._cfg.g_ov_nom)),
+        )
+
+    def _stage_air_from_cells(self, Q_air: np.ndarray) -> np.ndarray:
+        return np.column_stack([
+            np.mean(Q_air[:, 0:3], axis=1),
+            Q_air[:, 3],
+            Q_air[:, 4],
+            Q_air[:, 5],
+            Q_air[:, 6],
+        ])
+
+    def _stage_effect(self, s: int, stage_i: int, stage_air: float) -> float:
+        cfg = self._cfg
+        collector = 1.0 + cfg.flo_collector_gain * math.tanh(
+            (self._Q_TD[s] - cfg.flo_Q_TD_ref) / max(cfg.flo_collector_span, 1e-9)
+        )
+        pH_shape = math.exp(-((self._pH[s] - cfg.flo_pH_opt) / max(cfg.flo_pH_sigma, 1e-9)) ** 2)
+        density_shape = math.exp(-((self._flo_feed_C[s] - cfg.flo_C_opt) / max(cfg.flo_C_sigma, 1e-9)) ** 2)
+        size = np.clip(
+            1.0 + cfg.flo_size_gain * (self._flo_feed_f325[s] - cfg.flo_f325_ref),
+            0.65,
+            1.18,
+        )
+        air = np.clip(
+            1.0 + cfg.flo_air_gain * (stage_air / max(cfg.Q_air_nom, 1e-9) - 1.0),
+            0.72,
+            1.25,
+        )
+        stage_trim = (1.00, 1.02, 0.96, 0.94, 0.90)[stage_i]
+        effect = collector * (0.70 + 0.30 * pH_shape) * (0.78 + 0.22 * density_shape)
+        return float(np.clip(effect * size * air * stage_trim, 0.35, 1.45))
+
+    def _split_reverse_stage(
+        self,
+        feed: dict[str, float],
+        stage_i: int,
+        effect: float,
+    ) -> tuple[dict[str, float], dict[str, float], float]:
+        cfg = self._cfg
+        tau_h = cfg.flo_stage_tau_min[stage_i] / 60.0
+        R_gangue = 1.0 - math.exp(-cfg.flo_stage_gangue_rate_h[stage_i] * effect * tau_h)
+        R_fe_base = 1.0 - math.exp(
+            -cfg.flo_stage_fe_rate_h[stage_i] * (0.85 + 0.30 * effect) * tau_h
+        )
+        recover_to_froth = {
+            "gangue": float(np.clip(R_gangue, 0.0, 0.96)),
+            "fe_sil": float(np.clip(R_gangue * cfg.flo_sil_float_mult + 0.10 * R_fe_base, 0.0, 0.75)),
+            "fe_carb": float(np.clip(R_gangue * cfg.flo_carb_float_mult + 0.08 * R_fe_base, 0.0, 0.65)),
+            "fe_hem": float(np.clip(R_fe_base * cfg.flo_hem_float_mult, 0.0, 0.30)),
+            "fe_mag": float(np.clip(R_fe_base * cfg.flo_mag_float_mult, 0.0, 0.24)),
+        }
+        froth = {
+            key: max(feed.get(key, 0.0) * recover_to_froth[key], 0.0)
+            for key in _MASS_KEYS
+        }
+        conc = _subtract_stream(feed, froth)
+        feed_m = _stream_mass(feed)
+        hydro = 0.0
+        if feed_m > 1e-9:
+            hydro = (
+                froth.get("gangue", 0.0)
+                + froth.get("fe_sil", 0.0)
+                + froth.get("fe_carb", 0.0)
+                + cfg.flo_froth_fe_weight * (
+                    froth.get("fe_mag", 0.0) + froth.get("fe_hem", 0.0)
+                )
+            ) / feed_m
+        return conc, froth, float(np.clip(hydro, 0.02, 0.95))
+
+    def _close_final_products(
+        self,
+        feed: dict[str, float],
+        cleaner_conc: dict[str, float],
+        s: int,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        cfg = self._cfg
+        feed_m = _stream_mass(feed)
+        feed_fe = _stream_fe(feed)
+        if feed_m <= 1e-9 or feed_fe <= 1e-9:
+            return cleaner_conc, _zero_stream()
+
+        feed_grade = feed_fe / feed_m
+        conc_grade = float(np.clip(_stream_grade(cleaner_conc), feed_grade + 0.02, 0.70))
+        tail_grade = float(np.clip(
+            cfg.flo_tail_grade_nom
+            - 1.5e-5 * (self._Q_TD[s] - cfg.flo_Q_TD_ref)
+            + 0.03 * max(self._flo_feed_C[s] - cfg.flo_C_opt, 0.0),
+            0.17,
+            0.30,
+        ))
+        if not (tail_grade < feed_grade < conc_grade):
+            return cleaner_conc, _subtract_stream(feed, cleaner_conc)
+
+        conc_yield = float(np.clip(
+            (feed_grade - tail_grade) / max(conc_grade - tail_grade, 1e-9),
+            0.30,
+            0.78,
+        ))
+        conc_m = conc_yield * feed_m
+        conc_fe = min(conc_grade * conc_m, feed_fe * 0.98)
+        conc_gangue = min(max(conc_m - conc_fe, 0.0), feed.get("gangue", 0.0))
+
+        preference = {
+            "fe_mag": 1.00,
+            "fe_hem": 0.92,
+            "fe_carb": 0.62,
+            "fe_sil": 0.56,
+        }
+        weighted = {
+            key: feed.get(key, 0.0) * preference[key]
+            for key in _FE_KEYS
+        }
+        weighted_sum = sum(weighted.values())
+        if weighted_sum <= 1e-9:
+            conc_parts = _zero_stream()
+        else:
+            scale = conc_fe / weighted_sum
+            conc_parts = {
+                key: min(feed.get(key, 0.0), weighted[key] * scale)
+                for key in _FE_KEYS
+            }
+            allocated = sum(conc_parts.values())
+            if allocated < conc_fe - 1e-9:
+                remaining_need = conc_fe - allocated
+                remaining_pool = sum(feed.get(key, 0.0) - conc_parts[key] for key in _FE_KEYS)
+                if remaining_pool > 1e-9:
+                    for key in _FE_KEYS:
+                        room = feed.get(key, 0.0) - conc_parts[key]
+                        conc_parts[key] += remaining_need * room / remaining_pool
+        conc_parts["gangue"] = conc_gangue
+        final_conc = {key: max(conc_parts.get(key, 0.0), 0.0) for key in _MASS_KEYS}
+        final_tail = _subtract_stream(feed, final_conc)
+        return final_conc, final_tail
+
+    def _step_series_circuit(self, s: int, stage_air: np.ndarray) -> dict[str, object]:
+        cfg = self._cfg
+        feed = self._flo_feed_parts[s].copy()
+        rougher_feed = _add_streams(
+            feed,
+            _scale_stream(self._recycle_cleaner_tail[s], cfg.flo_recycle_cleaner_tail_frac),
+            _scale_stream(self._recycle_scav1_conc[s], cfg.flo_recycle_scav1_conc_frac),
+        )
+        rougher_conc, rougher_tail, h0 = self._split_reverse_stage(
+            rougher_feed, 0, self._stage_effect(s, 0, stage_air[0])
+        )
+        cleaner_conc, cleaner_tail, h1 = self._split_reverse_stage(
+            rougher_conc, 1, self._stage_effect(s, 1, stage_air[1])
+        )
+        scav1_feed = _add_streams(
+            rougher_tail,
+            _scale_stream(self._recycle_scav2_conc[s], cfg.flo_recycle_scav2_conc_frac),
+        )
+        scav1_conc, scav1_tail, h2 = self._split_reverse_stage(
+            scav1_feed, 2, self._stage_effect(s, 2, stage_air[2])
+        )
+        scav2_feed = _add_streams(
+            scav1_tail,
+            _scale_stream(self._recycle_scav3_conc[s], cfg.flo_recycle_scav3_conc_frac),
+        )
+        scav2_conc, scav2_tail, h3 = self._split_reverse_stage(
+            scav2_feed, 3, self._stage_effect(s, 3, stage_air[3])
+        )
+        scav3_conc, final_tail, h4 = self._split_reverse_stage(
+            scav2_tail, 4, self._stage_effect(s, 4, stage_air[4])
+        )
+        final_conc, closed_final_tail = self._close_final_products(
+            feed, cleaner_conc, s
+        )
+
+        self._recycle_cleaner_tail[s] = cleaner_tail
+        self._recycle_scav1_conc[s] = scav1_conc
+        self._recycle_scav2_conc[s] = scav2_conc
+        self._recycle_scav3_conc[s] = scav3_conc
+
+        return {
+            "feed": feed,
+            "rougher_feed": rougher_feed,
+            "rougher_conc": rougher_conc,
+            "rougher_tail": rougher_tail,
+            "cleaner_conc": cleaner_conc,
+            "cleaner_tail": cleaner_tail,
+            "scav1_conc": scav1_conc,
+            "scav1_tail": scav1_tail,
+            "scav2_conc": scav2_conc,
+            "scav2_tail": scav2_tail,
+            "scav3_conc": scav3_conc,
+            "scav3_tail": final_tail,
+            "final_tail": closed_final_tail,
+            "final_conc": final_conc,
+            "hydrophobic_frac": np.array([h0, h1, h2, h3, h4], dtype=float),
+        }
 
     def _tfe_ss_np(
         self,

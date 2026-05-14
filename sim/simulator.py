@@ -10,13 +10,14 @@ from pathlib import Path
 
 from sim.config import (
     SimConfig, DisturbanceConfig, BallMillConfig, BoundaryConfig, MagSepConfig, TowerMillConfig,
-    FlotationConfig,
+    FlotationConfig, ProcessLabConfig,
 )
 from sim.rng import RNGFactory
 from sim.layers.boundary import BoundaryGenerator
 from sim.layers.mag_sep import MagSepSystem
 from sim.layers.tower_mill import TowerMillSystem
 from sim.layers.flotation import FlotationSystem
+from sim.layers.process_lab import ProcessLabSampler
 from sim.output.writer import Writer
 
 
@@ -46,6 +47,7 @@ class Simulator:
         boundary_cfg: BoundaryConfig | None = None,
         tm_cfg: TowerMillConfig | None = None,
         flo_cfg: FlotationConfig | None = None,
+        lab_cfg: ProcessLabConfig | None = None,
         output_path: str | Path = "output/simulation.parquet",
         fmt: str = "parquet",
     ) -> None:
@@ -68,6 +70,11 @@ class Simulator:
             flo_cfg if flo_cfg is not None else FlotationConfig(),
             sim_cfg,
             rng_factory.get("flo"),
+        )
+        self._process_lab = ProcessLabSampler(
+            lab_cfg if lab_cfg is not None else ProcessLabConfig(),
+            sim_cfg,
+            rng_factory.get("process_lab"),
         )
         self._writer = Writer(output_path, fmt=fmt)
 
@@ -102,6 +109,7 @@ class Simulator:
         self._mag_sep.step(bus, t)         # 写磁选 DCS 变量 + _x_g_mag, _x_m_mag
         self._tower_mill.step(bus, t)      # 写塔磨 DCS 变量 + _x_f325_ov …
         self._flotation.step(bus, t)       # 写浮选 DCS 变量 + y_fx_xin1/2
+        self._process_lab.step(bus, t)     # 写确认点位过程化验 lab_*，不回流机理
 
         if write:
             self._writer.write_row(bus)

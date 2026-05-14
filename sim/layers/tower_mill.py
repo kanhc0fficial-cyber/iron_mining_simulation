@@ -29,6 +29,8 @@ from sim.utils.sensor import add_noise, add_drift, inject_fault
 from sim.utils.aggregation import active_mask, aggregate_active, write_aggregate
 
 _SQRT3 = math.sqrt(3.0)
+_FE_KEYS = ("fe_mag", "fe_hem", "fe_carb", "fe_sil")
+_MASS_KEYS = (*_FE_KEYS, "gangue")
 
 
 def _zoh_step(T: float, T_ss: float, tau: float, dt: float, noise: float = 0.0) -> float:
@@ -38,6 +40,59 @@ def _zoh_step(T: float, T_ss: float, tau: float, dt: float, noise: float = 0.0) 
     """
     phi = math.exp(-dt / tau)
     return T_ss + (T - T_ss) * phi + noise
+
+
+def _stream_mass(parts: dict[str, float]) -> float:
+    return float(sum(parts.get(k, 0.0) for k in _MASS_KEYS))
+
+
+def _stream_fe(parts: dict[str, float]) -> float:
+    return float(sum(parts.get(k, 0.0) for k in _FE_KEYS))
+
+
+def _stream_grade(parts: dict[str, float]) -> float:
+    m = _stream_mass(parts)
+    if m <= 1e-9:
+        return 0.0
+    return float(np.clip(_stream_fe(parts) / m, 0.0, 1.0))
+
+
+def _passing_from_d80_mm(x_mm: float, d80_mm: float, n_rr: float = 1.20) -> float:
+    d80 = max(float(d80_mm), 1e-6)
+    exponent = -math.log(0.20) * (max(float(x_mm), 1e-9) / d80) ** n_rr
+    return float(np.clip(1.0 - math.exp(-exponent), 0.0, 1.0))
+
+
+def _scale_stream(parts: dict[str, float], factor: float) -> dict[str, float]:
+    factor = max(float(factor), 0.0)
+    return {k: max(parts.get(k, 0.0) * factor, 0.0) for k in _MASS_KEYS}
+
+
+def _subtract_stream(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    return {k: max(a.get(k, 0.0) - b.get(k, 0.0), 0.0) for k in _MASS_KEYS}
+
+
+def _write_stream_hidden(
+    bus: dict,
+    prefix: str,
+    parts: dict[str, float],
+    f325: float,
+    f200: float,
+    f25: float,
+    d80: float,
+    liberation_fe: float,
+    liberation_gangue: float,
+) -> None:
+    bus[f"{prefix}_m"] = _stream_mass(parts)
+    bus[f"{prefix}_tfe"] = _stream_grade(parts)
+    bus[f"{prefix}_f325"] = f325
+    bus[f"{prefix}_f200"] = f200
+    bus[f"{prefix}_f25"] = f25
+    bus[f"{prefix}_d80"] = d80
+    bus[f"{prefix}_liberation_fe"] = liberation_fe
+    bus[f"{prefix}_liberation_gangue"] = liberation_gangue
+    for key in _MASS_KEYS:
+        bus[f"{prefix}_{key}"] = parts.get(key, 0.0)
 
 
 class TowerMillSystem:
@@ -87,6 +142,24 @@ class TowerMillSystem:
         cap = cfg.delay_steps + 1
         self._buf_m_mag = RingBuffer(capacity=cap, default=cfg.m_mag_nom)
         self._buf_g_mag = RingBuffer(capacity=cap, default=cfg.g_mag_nom)
+        total_fe_nom = cfg.m_mag_nom * cfg.g_mag_nom
+        component_defaults = {
+            "fe_mag": total_fe_nom * cfg.mag_fe_mag_frac_nom,
+            "fe_hem": total_fe_nom * cfg.mag_fe_hem_frac_nom,
+            "fe_carb": total_fe_nom * cfg.mag_fe_carb_frac_nom,
+            "fe_sil": total_fe_nom * cfg.mag_fe_sil_frac_nom,
+            "gangue": cfg.m_mag_nom * (1.0 - cfg.g_mag_nom),
+        }
+        self._buf_mag_parts = {
+            key: RingBuffer(capacity=cap, default=value)
+            for key, value in component_defaults.items()
+        }
+        self._buf_f200_mag = RingBuffer(capacity=cap, default=cfg.f200_mag_nom)
+        self._buf_f325_mag = RingBuffer(capacity=cap, default=cfg.f325_sand_nom)
+        self._buf_f25_mag = RingBuffer(capacity=cap, default=cfg.f25_mag_nom)
+        self._buf_d80_mag = RingBuffer(capacity=cap, default=cfg.d80_tm_init)
+        self._buf_lib_fe_mag = RingBuffer(capacity=cap, default=cfg.liberation_fe_feed_nom)
+        self._buf_lib_gangue_mag = RingBuffer(capacity=cap, default=cfg.liberation_gangue_feed_nom)
 
         # ── 磨机排矿返回延迟缓冲区（tau_mill 步）──────────────────────────
         mill_cap = cfg.tau_mill + 1
@@ -125,6 +198,48 @@ class TowerMillSystem:
         self._train_current_bias = self._rng.normal(0.0, cfg.train_cv_current, cfg.n_cyclone_trains)
         self._train_level_bias = self._rng.normal(0.0, cfg.train_cv_level, cfg.n_cyclone_trains)
 
+    def _mag_stream_from_bus(self, bus: dict) -> dict[str, float]:
+        if all(f"_x_mag_{key}" in bus for key in _MASS_KEYS):
+            return {key: float(bus[f"_x_mag_{key}"]) for key in _MASS_KEYS}
+
+        m_mag = float(bus["_x_m_mag"])
+        g_mag = float(np.clip(bus["_x_g_mag"], 0.0, 1.0))
+        total_fe = m_mag * g_mag
+        cfg = self._cfg
+        return {
+            "fe_mag": total_fe * cfg.mag_fe_mag_frac_nom,
+            "fe_hem": total_fe * cfg.mag_fe_hem_frac_nom,
+            "fe_carb": total_fe * cfg.mag_fe_carb_frac_nom,
+            "fe_sil": total_fe * cfg.mag_fe_sil_frac_nom,
+            "gangue": max(m_mag - total_fe, 0.0),
+        }
+
+    def _push_mag_stream(self, bus: dict) -> None:
+        parts = self._mag_stream_from_bus(bus)
+        for key in _MASS_KEYS:
+            self._buf_mag_parts[key].push(parts[key])
+        self._buf_f200_mag.push(float(bus.get("_x_f200_mag", self._cfg.f200_mag_nom)))
+        self._buf_f325_mag.push(float(bus.get("_x_f325_mag", self._cfg.f325_sand_nom)))
+        self._buf_f25_mag.push(float(bus.get("_x_f25_mag", self._cfg.f25_mag_nom)))
+        self._buf_d80_mag.push(float(bus.get("_x_d80_mag", self._cfg.d80_tm_init)))
+        self._buf_lib_fe_mag.push(float(bus.get("_x_liberation_fe_mag", self._cfg.liberation_fe_feed_nom)))
+        self._buf_lib_gangue_mag.push(float(bus.get("_x_liberation_gangue_mag", self._cfg.liberation_gangue_feed_nom)))
+
+    def _peek_delayed_mag_stream(self, delay_steps: int) -> tuple[dict[str, float], dict[str, float]]:
+        parts = {
+            key: self._buf_mag_parts[key].peek(delay_steps)
+            for key in _MASS_KEYS
+        }
+        attrs = {
+            "f200": self._buf_f200_mag.peek(delay_steps),
+            "f325": self._buf_f325_mag.peek(delay_steps),
+            "f25": self._buf_f25_mag.peek(delay_steps),
+            "d80": self._buf_d80_mag.peek(delay_steps),
+            "lib_fe": self._buf_lib_fe_mag.peek(delay_steps),
+            "lib_gangue": self._buf_lib_gangue_mag.peek(delay_steps),
+        }
+        return parts, attrs
+
     # ────────────────────────────────────────────────────────────────────
     # 主步进函数
     # ────────────────────────────────────────────────────────────────────
@@ -142,10 +257,15 @@ class TowerMillSystem:
         # 将当前步混磁精矿压入延迟缓冲区
         self._buf_m_mag.push(bus["_x_m_mag"])
         self._buf_g_mag.push(bus["_x_g_mag"])
+        self._push_mag_stream(bus)
 
         # 从缓冲区取 delay_steps 步前的输入（段间时滞）
         m_mag_delayed = self._buf_m_mag.peek(cfg.delay_steps)
         g_mag_delayed = self._buf_g_mag.peek(cfg.delay_steps)
+        mag_parts_delayed, mag_attrs_delayed = self._peek_delayed_mag_stream(cfg.delay_steps)
+        g_mag_components = _stream_grade(mag_parts_delayed)
+        if _stream_mass(mag_parts_delayed) > 1e-9:
+            g_mag_delayed = g_mag_components
 
         # ── 1. 泵池液位动力学 ─────────────────────────────────────────
         # 磁精矿入池体积流量（m³/s）
@@ -221,6 +341,12 @@ class TowerMillSystem:
         Q_ov = alpha_ov * Q_pump          # 溢流体积流量（m³/s）
         Q_sand = (1.0 - alpha_ov) * Q_pump  # 沉砂体积流量（m³/s）
 
+        Q_mag_in_safe = max(Q_mag_in, 1e-9)
+        cyclone_feed_scale = float(np.clip(Q_pump / Q_mag_in_safe, 0.1, 8.0))
+        cyclone_feed_parts = _scale_stream(mag_parts_delayed, cyclone_feed_scale)
+        cyclone_overflow_parts = _scale_stream(cyclone_feed_parts, alpha_ov)
+        cyclone_sand_parts = _subtract_stream(cyclone_feed_parts, cyclone_overflow_parts)
+
         # 推入沉砂量缓冲区（延迟后返回泵池）
         self._buf_Q_sand.push(Q_sand)
 
@@ -267,6 +393,7 @@ class TowerMillSystem:
         d80_disch = self._d80_sand * math.exp(-grind_rate * dt)
         d80_disch = float(np.clip(d80_disch, 0.005, cfg.d80_tm_init * 2.0))
         self._d80_sand = d80_disch
+        f325_discharge = _passing_from_d80_mm(0.045, d80_disch)
 
         # 溢流 −325目含量
         f325_ov = float(np.clip(
@@ -275,6 +402,32 @@ class TowerMillSystem:
             + self._rng.normal(0.0, cfg.sigma_f325),
             0.0, 1.0,
         ))
+        f325_feed = float(np.clip(mag_attrs_delayed["f325"], 0.0, 1.0))
+        f200_feed = float(np.clip(mag_attrs_delayed["f200"], 0.0, 1.0))
+        f25_feed = float(np.clip(mag_attrs_delayed["f25"], 0.0, 1.0))
+        d80_feed = float(max(mag_attrs_delayed["d80"], 1e-6))
+        delta_f325 = f325_ov - f325_feed
+        E_spec = P_mech / max(m_sand, 1e-6)
+        lib_fe_over = float(np.clip(
+            mag_attrs_delayed["lib_fe"]
+            + cfg.lib_class_fe_gain * delta_f325
+            + cfg.lib_energy_fe_gain * math.log1p(E_spec / max(cfg.E_spec_ref, 1e-6)),
+            0.0,
+            1.0,
+        ))
+        lib_gangue_over = float(np.clip(
+            mag_attrs_delayed["lib_gangue"]
+            + cfg.lib_class_gangue_gain * delta_f325
+            + cfg.lib_energy_gangue_gain * math.log1p(E_spec / max(cfg.E_spec_ref, 1e-6)),
+            0.0,
+            1.0,
+        ))
+        # 第一版沉砂粒级按更粗处理，解离度用残余趋势近似，避免复制溢流。
+        f325_sand_stream = float(np.clip(min(f325_feed, cfg.f325_sand_nom), 0.0, 1.0))
+        f200_sand_stream = float(np.clip(min(f200_feed, cfg.f200_mag_nom), 0.0, 1.0))
+        f25_sand_stream = float(np.clip(min(f25_feed, cfg.f25_mag_nom), 0.0, 1.0))
+        lib_fe_sand = float(np.clip(mag_attrs_delayed["lib_fe"] - 0.08 * max(delta_f325, 0.0), 0.0, 1.0))
+        lib_gangue_sand = float(np.clip(mag_attrs_delayed["lib_gangue"] - 0.14 * max(delta_f325, 0.0), 0.0, 1.0))
 
         # ── 6. 主电机电流 ─────────────────────────────────────────────
         I_motor = P_mech * 1000.0 / (_SQRT3 * cfg.V_line_tm * cfg.cos_phi_motor)
@@ -348,7 +501,8 @@ class TowerMillSystem:
 
         # ── 溢流质量流量 & 品位（供下游浮选段使用）───────────────────
         m_ov = Q_ov * cfg.rho_ov * 3600.0 / 1000.0   # t/h（湿态，溢流密度 ~14.93%）
-        g_ov = g_mag_delayed                                   # 品位不随研磨变化
+        c_ov = (cfg.rho_ov - 1000.0) / (2700.0 - 1000.0) * (2700.0 / cfg.rho_ov)
+        g_ov = _stream_grade(cyclone_overflow_parts)
 
         # ── 写入 bus（DCS 可观测量）───────────────────────────────────
         load_ratio = float(np.clip(Q_pump / max(cfg.k_pump * cfg.f_pump_nom * math.sqrt(max(cfg.L_pool_setpoint, 0.01)), 1e-9), 0.0, 1.8))
@@ -393,3 +547,55 @@ class TowerMillSystem:
         bus["_x_g_ov"] = g_ov
         bus["_x_P_mech"] = P_mech
         bus["_x_alpha_ov"] = alpha_ov
+        bus["_x_tm_cyclone_feed_pressure"] = P_cyc
+        bus["_x_tm_E_spec"] = E_spec
+        bus["_x_tm_discharge_f325"] = f325_discharge
+        bus["_x_tm_discharge_d80"] = d80_disch
+        bus["_x_tm_overflow_conc"] = float(np.clip(c_ov, 0.0, 1.0))
+
+        _write_stream_hidden(
+            bus,
+            "_x_tm_cyclone_feed",
+            cyclone_feed_parts,
+            f325_feed,
+            f200_feed,
+            f25_feed,
+            d80_feed,
+            mag_attrs_delayed["lib_fe"],
+            mag_attrs_delayed["lib_gangue"],
+        )
+        _write_stream_hidden(
+            bus,
+            "_x_tm_cyclone_overflow",
+            cyclone_overflow_parts,
+            f325_ov,
+            f200_feed,
+            f25_feed,
+            d80_disch,
+            lib_fe_over,
+            lib_gangue_over,
+        )
+        _write_stream_hidden(
+            bus,
+            "_x_tm_cyclone_sand",
+            cyclone_sand_parts,
+            f325_sand_stream,
+            f200_sand_stream,
+            f25_sand_stream,
+            self._d80_sand,
+            lib_fe_sand,
+            lib_gangue_sand,
+        )
+        _write_stream_hidden(
+            bus,
+            "_x_tm_overflow",
+            cyclone_overflow_parts,
+            f325_ov,
+            f200_feed,
+            f25_feed,
+            d80_disch,
+            lib_fe_over,
+            lib_gangue_over,
+        )
+        for key in _MASS_KEYS:
+            bus[f"_x_tm_overflow_{key}"] = cyclone_overflow_parts.get(key, 0.0)

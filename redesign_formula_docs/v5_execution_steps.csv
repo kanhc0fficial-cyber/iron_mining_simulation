@@ -1,0 +1,21 @@
+step_order,stage,description
+010,boundary,Update exogenous ore OU states and line availability.
+020,boundary,"Compute per-line wet/solid flow, grade, size, density, liberation, temperature."
+030,boundary,Mass-weight mix three feed lines into boundary Stream.
+100,magnetic,Update magnetic controller setpoints and actuator states.
+110,magnetic,"Update matrix clog, magnetic field, capture, entrainment, concentrate/tail streams."
+120,magnetic,Compute magnetic DCS physical signals and measurements.
+200,tower_mill,Update cyclone feed pool CSTR mixed Stream from magnetic concentrate and delayed mill discharge.
+210,tower_mill,"Update cyclone feed pump controller, pump flow, pressure, and pump DCS signals."
+220,tower_mill,"Compute cyclone partition, overflow/sand Streams, and absolute water/solid balances."
+230,tower_mill,"Update sand water addition, mill density, circulating load, mill power."
+240,tower_mill,Update mill discharge Stream through tau_mill_residence states.
+250,tower_mill,Update thermal states and tower mill DCS measurements.
+300,flotation,Update thickener inventory and flotation feed Stream.
+310,flotation,"Update reagent demand, pump actuators, actual dose and adsorption lag states."
+320,flotation,"Update pH/Ca2+, blower/header, air valves, gas holdup and froth height."
+330,flotation,Update cell apparent level control and outflow.
+340,flotation,"Update CSTR component inventories, froth/tail rates and stream topology."
+350,flotation,Update flotation DCS measurements and series power.
+400,lab,Sample process lab variables using sample_time/report_time delays.
+500,label,Generate final labels from physically delayed final concentrate streams only.

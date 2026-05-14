@@ -13,6 +13,7 @@
 - `v5_migration_from_v4.csv`: V4 公式迁移台账。每条 V4 公式必须有迁移状态。
 - `v5_manual_formulas.csv`: V5 为闭合关键因果链而新增的人工公式，主要用于实际药剂剂量和浮选 CSTR 缺口。
 - `v5_external_inputs.csv`: 未由公式生成但被公式引用的父节点注册表。每个父节点必须被分类为参数、上游流状态、设备状态、控制器内部量、实验室输入或模板索引。
+- `v5_implementation_constraints.csv`: 不作为每分钟公式执行、但必须进入 pytest/实现红线的设计约束。
 
 ## 执行原则
 

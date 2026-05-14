@@ -2,11 +2,11 @@
 
 V4 extracted formula assignments: **581**
 V4 executable candidates: **567**
-V5 canonical formulas: **514**
-V5 executable formulas: **421**
-Manual closure formulas: **13**
-V5 variables: **514**
-V5 causal edges: **2033**
+V5 canonical formulas: **523**
+V5 executable formulas: **443**
+Manual closure formulas: **22**
+V5 variables: **523**
+V5 causal edges: **2063**
 V5 DCS rows: **70**
 
 ## Migration Status Counts

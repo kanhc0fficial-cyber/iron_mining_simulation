@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 V5_SPEC_DIR = "redesign_formula_docs"
+CSV_FIRST_DATA_ROW_NUMBER = 2
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,7 @@ def _resolve_spec_dir(repo_root: Path | str | None) -> Path:
     return root / V5_SPEC_DIR
 
 
-def _read_rows(path: Path, required_columns: set[str]) -> list[dict[str, str]]:
+def _read_and_validate_columns(path: Path, required_columns: set[str]) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = set(reader.fieldnames or [])
@@ -84,7 +85,9 @@ def _read_rows(path: Path, required_columns: set[str]) -> list[dict[str, str]]:
 def _require_non_empty(value: str, field_name: str, file_name: str, row_index: int) -> str:
     stripped = value.strip()
     if not stripped:
-        raise ValueError(f"{file_name}: row {row_index} has empty required field '{field_name}'")
+        raise ValueError(
+            f"{file_name}: row {row_index} (including header) has empty required field '{field_name}'"
+        )
     return stripped
 
 
@@ -102,55 +105,59 @@ def _validate_unique_formulas(formulas: list[V5ExecutableFormula]) -> None:
 
 def load_v5_clean_spec(repo_root: Path | str | None = None) -> V5CleanSpec:
     spec_dir = _resolve_spec_dir(repo_root)
+    formulas_file = "v5_executable_formulas.csv"
+    dcs_file = "v5_dcs_outputs.csv"
+    steps_file = "v5_execution_steps.csv"
+    external_file = "v5_external_inputs.csv"
 
-    formulas_rows = _read_rows(
-        spec_dir / "v5_executable_formulas.csv",
-        REQUIRED_COLUMNS["v5_executable_formulas.csv"],
+    formulas_rows = _read_and_validate_columns(
+        spec_dir / formulas_file,
+        REQUIRED_COLUMNS[formulas_file],
     )
     formulas = [
         V5ExecutableFormula(
-            formula_id=_require_non_empty(row["formula_id"], "formula_id", "v5_executable_formulas.csv", i),
-            stage=_require_non_empty(row["stage"], "stage", "v5_executable_formulas.csv", i),
-            lhs=_require_non_empty(row["lhs"], "lhs", "v5_executable_formulas.csv", i),
-            rhs=_require_non_empty(row["rhs"], "rhs", "v5_executable_formulas.csv", i),
+            formula_id=_require_non_empty(row["formula_id"], "formula_id", formulas_file, i),
+            stage=_require_non_empty(row["stage"], "stage", formulas_file, i),
+            lhs=_require_non_empty(row["lhs"], "lhs", formulas_file, i),
+            rhs=_require_non_empty(row["rhs"], "rhs", formulas_file, i),
             parents=row["parents"].strip(),
         )
-        for i, row in enumerate(formulas_rows, start=2)
+        for i, row in enumerate(formulas_rows, start=CSV_FIRST_DATA_ROW_NUMBER)
     ]
     _validate_unique_formulas(formulas)
 
-    dcs_rows = _read_rows(spec_dir / "v5_dcs_outputs.csv", REQUIRED_COLUMNS["v5_dcs_outputs.csv"])
+    dcs_rows = _read_and_validate_columns(spec_dir / dcs_file, REQUIRED_COLUMNS[dcs_file])
     dcs_outputs = [
         V5DcsOutput(
-            dcs_name=_require_non_empty(row["dcs_name"], "dcs_name", "v5_dcs_outputs.csv", i),
-            physical_parent=_require_non_empty(row["physical_parent"], "physical_parent", "v5_dcs_outputs.csv", i),
+            dcs_name=_require_non_empty(row["dcs_name"], "dcs_name", dcs_file, i),
+            physical_parent=_require_non_empty(row["physical_parent"], "physical_parent", dcs_file, i),
             migration_status=row["migration_status"].strip(),
             notes=row["notes"].strip(),
         )
-        for i, row in enumerate(dcs_rows, start=2)
+        for i, row in enumerate(dcs_rows, start=CSV_FIRST_DATA_ROW_NUMBER)
     ]
 
-    steps_rows = _read_rows(spec_dir / "v5_execution_steps.csv", REQUIRED_COLUMNS["v5_execution_steps.csv"])
+    steps_rows = _read_and_validate_columns(spec_dir / steps_file, REQUIRED_COLUMNS[steps_file])
     execution_steps = [
         V5ExecutionStep(
-            step_order=_require_non_empty(row["step_order"], "step_order", "v5_execution_steps.csv", i),
-            stage=_require_non_empty(row["stage"], "stage", "v5_execution_steps.csv", i),
-            description=_require_non_empty(row["description"], "description", "v5_execution_steps.csv", i),
+            step_order=_require_non_empty(row["step_order"], "step_order", steps_file, i),
+            stage=_require_non_empty(row["stage"], "stage", steps_file, i),
+            description=_require_non_empty(row["description"], "description", steps_file, i),
         )
-        for i, row in enumerate(steps_rows, start=2)
+        for i, row in enumerate(steps_rows, start=CSV_FIRST_DATA_ROW_NUMBER)
     ]
 
-    external_rows = _read_rows(spec_dir / "v5_external_inputs.csv", REQUIRED_COLUMNS["v5_external_inputs.csv"])
+    external_rows = _read_and_validate_columns(spec_dir / external_file, REQUIRED_COLUMNS[external_file])
     external_inputs = [
         V5ExternalInput(
-            parent=_require_non_empty(row["parent"], "parent", "v5_external_inputs.csv", i),
-            classification=_require_non_empty(row["classification"], "classification", "v5_external_inputs.csv", i),
+            parent=_require_non_empty(row["parent"], "parent", external_file, i),
+            classification=_require_non_empty(row["classification"], "classification", external_file, i),
             used_by_lhs=row["used_by_lhs"].strip(),
             stages=row["stages"].strip(),
             source_v4_lines=row["source_v4_lines"].strip(),
             notes=row["notes"].strip(),
         )
-        for i, row in enumerate(external_rows, start=2)
+        for i, row in enumerate(external_rows, start=CSV_FIRST_DATA_ROW_NUMBER)
     ]
 
     return V5CleanSpec(

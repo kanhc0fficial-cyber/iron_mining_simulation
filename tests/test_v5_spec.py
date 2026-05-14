@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sim.v5_spec import load_v5_clean_spec
 

@@ -72,7 +72,7 @@ def thermal_derate(T: float, T_ref: float = 50.0, alpha: float = 0.002) -> float
 
 
 # ---------------------------------------------------------------------------
-# Measurement passthrough
+# Measurement passthrough and realistic sensor model
 # ---------------------------------------------------------------------------
 
 
@@ -85,6 +85,78 @@ def meas(val: Any) -> float:
     if val is None:
         return float("nan")
     return float(val)
+
+
+def meas_sensor(
+    val: Any,
+    *,
+    sigma_noise: float = 0.0,
+    drift_rate: float = 0.0,
+    drift_time: float = 0.0,
+    clip_lo: float = float("-inf"),
+    clip_hi: float = float("inf"),
+    fault_active: bool = False,
+    fault_value: float = float("nan"),
+    rng=None,
+) -> float:
+    """Realistic DCS sensor model: noise + drift + clipping + fault window.
+
+    This is the full-featured measurement function used when a DCS point needs
+    more than a clean passthrough.  It implements PR-4 requirement: *"支持
+    meas(…): 噪声、漂移、clipping、missing/fault window"*.
+
+    Parameters
+    ----------
+    val :
+        True physical value.  ``None`` maps to NaN.
+    sigma_noise :
+        Standard deviation of zero-mean Gaussian measurement noise.
+        Set to 0 (default) to disable noise.
+    drift_rate :
+        Bias drift per second.  A positive value means the sensor over-reads
+        linearly with time.
+    drift_time :
+        Cumulative elapsed simulation time in seconds used to compute the
+        drift offset: ``drift_offset = drift_rate * drift_time``.
+    clip_lo :
+        Lower saturation limit.  Values below this are clamped.
+    clip_hi :
+        Upper saturation limit.  Values above this are clamped.
+    fault_active :
+        When ``True`` the sensor is in a fault window and ``fault_value`` is
+        returned unconditionally (missing/stuck/fault injection).
+    fault_value :
+        Value returned during a fault window.  ``float("nan")`` models a
+        missing/off-line sensor (default).
+    rng :
+        Optional :class:`random.Random` instance for reproducibility.
+
+    Returns
+    -------
+    float
+        Measured value after noise, drift, clipping, and fault processing.
+    """
+    if fault_active:
+        return float(fault_value)
+
+    if val is None:
+        return float("nan")
+
+    measured = float(val)
+
+    # Add drift offset
+    measured += drift_rate * drift_time
+
+    # Add Gaussian noise
+    if sigma_noise != 0.0:
+        _rng = rng if rng is not None else _random_module
+        measured += _rng.gauss(0.0, float(sigma_noise))
+
+    # Clipping / saturation
+    if not math.isnan(measured):
+        measured = max(float(clip_lo), min(float(clip_hi), measured))
+
+    return measured
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +403,7 @@ def build_helpers_namespace(rng=None) -> dict:
         "sigmoid": sigmoid,
         "thermal_derate": thermal_derate,
         "meas": meas,
+        "meas_sensor": meas_sensor,
         "N": _noise,
         "noise": _noise,
         "ffill_reported": ffill_reported,

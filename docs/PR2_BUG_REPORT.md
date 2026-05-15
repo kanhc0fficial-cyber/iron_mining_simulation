@@ -6,7 +6,7 @@
 **Review method:** manual code reading + angle-script probing
 (automated edge-case Python scripts executed against live module objects).
 
-**Full test run:** 483 tests passed (469 original + 14 new) after all fixes.
+**Full test run:** 483 tests passed (469 original + 14 new = 483 total; test_v5_state_and_scheduler.py grew from 44 to 58 tests) after all fixes.
 
 ---
 

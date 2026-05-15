@@ -69,16 +69,15 @@ PR 2 实现了 V5 引擎的**运行骨架**，即在不执行任何公式 RHS �
 
 | 功能 | API |
 |------|-----|
-| 有序阶段列表 | `scheduler.ordered_stages()` → `["boundary", "magnetic", "tower_mill", "flotation", "lab", "label"]` |
+| 有序阶段列表 | `scheduler.ordered_stages()` → `["boundary", "magnetic", "tower_mill", "flotation", "dcs", "lab", "label"]` |
 | 某阶段步骤列表 | `scheduler.steps_for_stage(stage)` |
 | 某阶段运行时公式 | `scheduler.formulas_for_stage(stage)` → 排除 `concept`/`reference` 角色 |
 | 手工权威公式可见性 | `scheduler.manual_formulas_for_stage(stage)` / `scheduler.all_manual_formulas()` |
 | 驱动单步执行 | `scheduler.run_step(evaluator, stages=None)` |
 
-**⚠️ 重要限制（BUG-1）：**  
-`global` 阶段（17 个 definition 公式：`Fe_total`, `Stream`, `mu_slurry` 等）和 `dcs` 阶段（3 个公式，含 `manual_closure` 的 `fx_s{s}_{c}_froth_h`）**不在** `v5_execution_steps.csv` 中，因此 `formulas_for_stage("global")` 和 `formulas_for_stage("dcs")` **返回空列表**，这些公式不会被 `run_step()` 调度。
-
-这是一个待修复的关键 Bug，见 `docs/PR2_BUG_REPORT.md`。
+**✅ BUG-1 已修复：**  
+`dcs` 阶段（3 个公式，含 `manual_closure` 的 `fx_s{s}_{c}_froth_h`）已加入 `v5_execution_steps.csv`（step 360），现在正常调度。  
+`global` 阶段（17 个 definition 公式：`Fe_total`, `Stream`, `mu_slurry` 等）不作为独立步骤调度——它们是 helper 定义，由公式求值器内联使用。调度器启动时对遗漏 executable 阶段会抛 `ValueError`。
 
 ---
 
@@ -119,8 +118,8 @@ def evaluator(formula):
 
 for step in range(n_steps):
     scheduler.run_step(evaluator)
-    # 在 advance() 之前读取 DCS 缓冲并写入输出文件
-    dcs_snapshot = dict(store.dcs_buffer)
+    # 在 advance() 之前用 flush_dcs() 读取 DCS 缓冲并写入输出文件（推荐写法）
+    dcs_snapshot = store.flush_dcs()
     store.advance()
 ```
 
@@ -132,11 +131,11 @@ for step in range(n_steps):
 
 | 测试类 | 测试数 | 覆盖内容 |
 |--------|--------|---------|
-| `TestStateStore` | 25 | set/get、advance、previous、DCS buffer、snapshot、has()、flush_dcs()、previous_dcs、snapshot_full() |
+| `TestStateStore` | 24 | set/get、advance、previous、DCS buffer、snapshot、has()、flush_dcs()、previous_dcs、snapshot_full() |
 | `TestExternalInputRegistry` | 12 | 注册检查、分类查询、断言守卫 |
 | `TestExecutionScheduler` | 19 | 阶段顺序（含 dcs）、步骤排序、公式过滤、manual 可见性、run_step、dcs 阶段验证 |
 | `TestStateAndRegistryIntegration` | 3 | previous_state_reference 模式、注册守卫集成 |
-| **合计** | **59** | |
+| **合计** | **58** | |
 
 ---
 

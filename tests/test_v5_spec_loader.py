@@ -81,13 +81,13 @@ class TestFormulaRegistryIndexes:
         total = sum(len(v) for v in registry.by_stage.values())
         assert total == len(registry.formulas)
 
-    def test_parents_of_returns_frozenset(self, registry):
+    def test_parents_of_returns_tuple(self, registry):
         parents = registry.dependency_list("B_eff")
-        assert isinstance(parents, frozenset)
+        assert isinstance(parents, tuple)
         assert len(parents) > 0
 
     def test_parents_of_unknown_lhs_returns_empty(self, registry):
-        assert registry.dependency_list("__nonexistent__") == frozenset()
+        assert registry.dependency_list("__nonexistent__") == ()
 
     def test_registered_external_parents_nonempty(self, registry):
         ext = registry.registered_external_parents()

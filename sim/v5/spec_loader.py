@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterator, List, NamedTuple, Optional, Sequence
+from typing import Dict, FrozenSet, Iterator, List, NamedTuple, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ class FormulaRow(NamedTuple):
     lhs: str
     rhs: str
     formula_line: str
-    parents: FrozenSet[str]
+    parents: Tuple[str, ...]
     state_type: str
     formula_role: str
     observable: str
@@ -53,7 +53,7 @@ class FormulaRow(NamedTuple):
     @classmethod
     def from_dict(cls, d: dict) -> "FormulaRow":
         raw_parents = d.get("parents", "") or ""
-        parents = frozenset(p.strip() for p in raw_parents.split(";") if p.strip())
+        parents = tuple(p.strip() for p in raw_parents.split(";") if p.strip())
         return cls(
             formula_id=d["formula_id"],
             stage=d["stage"],
@@ -270,9 +270,14 @@ class FormulaRegistry:
         self.by_id: Dict[str, FormulaRow] = {}
         self.by_lhs: Dict[str, FormulaRow] = {}
         self.by_stage: Dict[str, List[FormulaRow]] = defaultdict(list)
-        self.parents_of: Dict[str, FrozenSet[str]] = {}
+        self.parents_of: Dict[str, Tuple[str, ...]] = {}
 
         for row in formulas:
+            if row.formula_id in self.by_id:
+                raise SpecValidationError(
+                    f"Duplicate formula_id in executable formulas: '{row.formula_id}' "
+                    f"(lhs '{self.by_id[row.formula_id].lhs}' and '{row.lhs}')"
+                )
             self.by_id[row.formula_id] = row
             self.by_stage[row.stage].append(row)
             self.parents_of[row.lhs] = row.parents
@@ -293,9 +298,9 @@ class FormulaRegistry:
         """Return formulas for *stage* in declaration order."""
         return list(self.by_stage.get(stage, []))
 
-    def dependency_list(self, lhs: str) -> FrozenSet[str]:
-        """Return the parent set for *lhs*; empty frozenset if not found."""
-        return self.parents_of.get(lhs, frozenset())
+    def dependency_list(self, lhs: str) -> Tuple[str, ...]:
+        """Return the parent tuple for *lhs* in CSV declaration order; empty tuple if not found."""
+        return self.parents_of.get(lhs, ())
 
     def iter_by_status(self, status: str) -> Iterator[FormulaRow]:
         """Iterate formulas whose status matches *status*."""
@@ -382,6 +387,7 @@ class SpecLoader:
         self._validate_statuses_and_roles(formulas)
         self._validate_required_statuses_present(formulas)
         self._validate_parents(registry)
+        self._validate_formula_variable_consistency(registry)
 
         return registry
 
@@ -494,6 +500,41 @@ class SpecLoader:
             )
             raise SpecValidationError(
                 f"Formula parents not registered as LHS or external input: {items}"
+            )
+
+    @staticmethod
+    def _validate_formula_variable_consistency(registry: FormulaRegistry) -> None:
+        """Every formula LHS must have a corresponding variable row, and vice versa.
+
+        Mirrors the hard-check logic in ``redesign_formula_docs/validate_v5_clean_spec.py``.
+        """
+        formula_lhs = frozenset(row.lhs for row in registry.formulas)
+        known_formula_ids = frozenset(row.formula_id for row in registry.formulas)
+
+        # Only check variable rows that explicitly reference a formula in this CSV.
+        var_names = frozenset(
+            var.variable
+            for var in registry.variables
+            if var.defined_by_formula_id in known_formula_ids
+        )
+
+        formulas_without_variable = sorted(formula_lhs - var_names)
+        variables_without_formula = sorted(var_names - formula_lhs)
+
+        errors: List[str] = []
+        if formulas_without_variable:
+            items = ", ".join(formulas_without_variable[:10])
+            errors.append(
+                f"Formula LHS values missing from v5_variables.csv: {items}"
+            )
+        if variables_without_formula:
+            items = ", ".join(variables_without_formula[:10])
+            errors.append(
+                f"Variable rows in v5_variables.csv with no matching formula LHS: {items}"
+            )
+        if errors:
+            raise SpecValidationError(
+                "formulas/variables cross-table inconsistency: " + "; ".join(errors)
             )
 
 

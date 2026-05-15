@@ -138,8 +138,14 @@ class StateStore:
     def advance(self) -> None:
         """Advance the store to the next time step.
 
-        Copies ``current`` into ``previous``, then clears ``current`` so
-        that it can be repopulated by the next evaluation cycle.
+        Merges ``current`` into ``previous`` (current values take priority),
+        then clears ``current`` so it can be repopulated by the next cycle.
+
+        Using merge (rather than replace) ensures that variables not
+        recomputed in a given step retain their last-known value in
+        ``previous``.  This is important for slow-dynamics state variables
+        (temperatures, matrix-clog, etc.) that may only be updated
+        occasionally.
 
         The DCS buffer is saved to ``previous_dcs`` before being cleared so
         that it remains readable after the advance (e.g. for a late-reading
@@ -151,7 +157,12 @@ class StateStore:
             (via :meth:`get_dcs` or :meth:`flush_dcs`) **before** calling
             ``advance()``.
         """
-        self.previous = dict(self.current)
+        # Merge rather than replace: variables not recomputed in the current step
+        # retain their last-known value in ``previous``.  This prevents slow-
+        # dynamics state variables (temperatures, long time-constants, etc.)
+        # from silently disappearing from the namespace after a single missed
+        # step.  The update order ensures the freshest value always wins.
+        self.previous = {**self.previous, **self.current}
         self.current = {}
         self.previous_dcs = dict(self.dcs_buffer)
         self.dcs_buffer = {}

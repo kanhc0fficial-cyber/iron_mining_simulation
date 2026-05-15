@@ -155,8 +155,6 @@ Q_in_cell = Q_total_s / _N_CELLS   # 均匀分配，无级联
 ## PR #8：V5 spec loader 反向审查（2026-05-15）
 
 本节记录对当前 PR（`sim/v5/spec_loader.py`）做的“换角度”审查。
-按你的要求：**只记录问题，不修改实现**。
-
 ### 新增审查脚本
 
 已新增脚本：
@@ -308,15 +306,13 @@ def dependency_list(self, lhs: str) -> FrozenSet[str]:
 ## 本轮结论
 
 当前 PR 的主体目标（加载 V5 CSV、建立基本索引、拒绝明显坏规格）**已经完成**，
-但从“反向破坏输入”的角度看，至少还有 2 个结构性遗漏 + 1 个 API 语义问题：
+PR8 期间记录的 3 项问题已全部修复：
 
-| 编号 | 描述 | 类型 | 影响 |
-|------|------|------|------|
-| BUG-PR8-A | duplicate `formula_id` 未被拒绝 | 结构校验遗漏 | 中 |
-| BUG-PR8-B | `formulas` / `variables` 跨表一致性未校验 | 结构校验遗漏 | 中 |
-| 观察-PR8-C | `dependency_list()` 返回无序集合 | API 语义偏差 | 低~中 |
-
-按你的要求：**上述问题仅记录，未在本次提交中修复。**
+| 编号 | 描述 | 类型 | 影响 | 状态 |
+|------|------|------|------|------|
+| BUG-PR8-A | duplicate `formula_id` 未被拒绝 | 结构校验遗漏 | 中 | ✅ 已修复 |
+| BUG-PR8-B | `formulas` / `variables` 跨表一致性未校验 | 结构校验遗漏 | 中 | ✅ 已修复 |
+| 观察-PR8-C | `dependency_list()` 返回无序集合 | API 语义偏差 | 低~中 | ✅ 已解决（返回 tuple）|
 
 ---
 

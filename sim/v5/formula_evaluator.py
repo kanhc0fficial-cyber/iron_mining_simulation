@@ -106,6 +106,11 @@ def preprocess_rhs(rhs: str) -> str:
     # Strip trailing inline comments
     expr = re.sub(r"\s*#[^\n]*$", "", expr).strip()
 
+    # Replace V5 spec semicolons used as argument separators with Python commas.
+    # The V5 formula spec uses ";" as an alternative separator inside function
+    # calls (e.g. F(45e-6;d80_i,n_rr)).  Python requires commas.
+    expr = expr.replace(";", ",")
+
     return expr
 
 
@@ -272,23 +277,29 @@ class FormulaEvaluator:
             self.executed_lhs.add(formula.lhs)
             return result
         except NameError as exc:
-            raise UnsupportedFormulaError(
+            err = (
                 f"Formula '{formula.lhs}' (id={formula.formula_id}) "
                 f"references an unresolved name: {exc}. "
                 "Add the missing variable to the initial state, static params, "
                 "or implement an explicit helper."
-            ) from exc
+            )
+            self.unsupported[formula.lhs] = err
+            raise UnsupportedFormulaError(err) from exc
         except ZeroDivisionError as exc:
-            raise FormulaEvaluationError(
+            err = (
                 f"Formula '{formula.lhs}' (id={formula.formula_id}) "
                 f"caused a zero-division error: {exc}."
-            ) from exc
+            )
+            self.failed[formula.lhs] = err
+            raise FormulaEvaluationError(err) from exc
         except Exception as exc:
-            raise FormulaEvaluationError(
+            err = (
                 f"Formula '{formula.lhs}' (id={formula.formula_id}) "
                 f"failed during evaluation: {type(exc).__name__}: {exc}. "
                 f"RHS after preprocessing: {expr!r}"
-            ) from exc
+            )
+            self.failed[formula.lhs] = err
+            raise FormulaEvaluationError(err) from exc
 
     def reset_tracking(self) -> None:
         """Clear execution-tracking sets between runs."""

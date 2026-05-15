@@ -135,7 +135,7 @@ Added `ValueError` on duplicate `parent` names during `__init__` construction.
 
 ---
 
-## Summary Table
+## Summary Table — PR-2 Bugs
 
 | ID | Severity | Fixed? | Module |
 |----|----------|--------|--------|
@@ -149,6 +149,126 @@ Added `ValueError` on duplicate `parent` names during `__init__` construction.
 | NOTE-3 | Low | ⚠️ Documented | `execution_scheduler.py` |
 | NOTE-4 | Low | ✅ Fixed | `external_input_registry.py` |
 | NOTE-5 | Low | ⚠️ Documented | `execution_scheduler.py` |
+
+---
+
+## Follow-on Bugs — Discovered by Angle-Script Probing (2026-05-15)
+
+These bugs were found during post-PR-2 regression testing of the PR-3 evaluation engine.
+All are fixed in the same session.
+
+### BUG-A · `_eval_and_store()` silently dropped `None`-returning formulas
+
+**Status: ✅ FIXED**  
+**File:** `sim/v5/engine.py`
+
+**Root cause:**  
+`_eval_and_store()` checked `if result is not None` before writing to the store.
+A formula returning Python `None` was silently discarded — the LHS was never written
+and the failure was invisible to callers.
+
+**Fix applied:**  
+`None` result is now recorded in `engine.skipped` with a descriptive message.
+The variable is *not* written to the store (correct), but the absence is now visible.
+
+---
+
+### BUG-B · `FormulaEvaluator.unsupported` / `failed` dicts were never populated
+
+**Status: ✅ FIXED**  
+**File:** `sim/v5/formula_evaluator.py`
+
+**Root cause:**  
+The `eval_formula()` method re-raised `NameError` and `Exception` without adding
+the failing LHS to `self.unsupported` or `self.failed`.
+The tracking dicts always stayed empty regardless of how many formulas failed.
+
+**Fix applied:**  
+Each `except` branch now writes to the corresponding dict before re-raising,
+so callers can inspect evaluation failures independently of the exception chain.
+
+---
+
+### BUG-C · `DCSOutputRegistry` compound-row registration overwrote individual rows
+
+**Status: ✅ FIXED**  
+**File:** `sim/v5/dcs_registry.py`
+
+**Root cause:**  
+Single-pass registration split `dcs_name` on `"/"` and used the prefix as the only
+key.  For a row like `"agg_mag_tailings_valve1/2"`, the prefix `"agg_mag_tailings_valve1"`
+overwrote a separately-defined row with the same exact name, making that row
+unreachable via `get()`.
+
+**Fix applied:**  
+Two-pass registration: pass 1 registers every row by its exact `dcs_name`; pass 2
+adds split-prefix aliases only via `setdefault()` (never overwriting).
+
+---
+
+### BUG-D · `preprocess_rhs()` did not convert semicolons to commas
+
+**Status: ✅ FIXED**  
+**File:** `sim/v5/formula_evaluator.py`
+
+**Root cause:**  
+V5 spec uses `";"` as an alternate argument separator in function calls
+(e.g. `F(45e-6;d80_i,n_rr)`).  Python requires `","`, so every formula with a
+semicolon-separated argument list produced a `SyntaxError` inside `eval()`.
+`F325_i` was the primary affected formula.
+
+**Fix applied:**  
+`preprocess_rhs()` now replaces all `";"` with `","` before compilation.
+
+---
+
+### BUG-F · `StateStore.advance()` erased variables not written in the current step
+
+**Status: ✅ FIXED**  
+**File:** `sim/v5/state_store.py`
+
+**Root cause:**  
+`advance()` replaced `previous` with a shallow copy of `current`.  Variables with
+long time-constants (temperatures, matrix-clog, etc.) that were not recomputed
+every step silently disappeared from the store after their first missed step.
+
+**Fix applied:**  
+`advance()` now *merges* `current` into `previous` (`{**previous, **current}`).
+Variables not recomputed in a step retain their last-known value.
+
+---
+
+### BUG-G · Engine warning fired for expected template-placeholder skips
+
+**Status: ✅ FIXED**  
+**File:** `sim/v5/engine.py`
+
+**Root cause:**  
+`run()` emitted a `RuntimeWarning` whenever `self.skipped` was non-empty.
+Template-placeholder formulas (unexpanded `{s,c}` subscripts) are *expected* to
+be skipped at the skeleton stage; wrapping them in a warning created false alarms
+that masked genuine runtime failures.
+
+**Fix applied:**  
+The warning is now filtered: it fires only if there are *unexpected* skips (those
+whose message does not contain `"template placeholder"`).  The warning message
+also includes the `template_placeholders=N` count for transparency.
+
+---
+
+## Summary Table — Follow-on Bugs
+
+| ID | Severity | Fixed? | Module |
+|----|----------|--------|--------|
+| BUG-A | Medium | ✅ Fixed | `engine.py` |
+| BUG-B | Medium | ✅ Fixed | `formula_evaluator.py` |
+| BUG-C | Medium | ✅ Fixed | `dcs_registry.py` |
+| BUG-D | High | ✅ Fixed | `formula_evaluator.py` |
+| BUG-F | High | ✅ Fixed | `state_store.py` |
+| BUG-G | Low | ✅ Fixed | `engine.py` |
+
+**Regression tests added:** 9 new tests in `tests/test_v5_stage_execution.py`
+(`TestBugRegressions` class).
 
 ---
 

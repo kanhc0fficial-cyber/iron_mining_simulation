@@ -232,8 +232,8 @@ class FormulaRegistry:
         lhs -> FormulaRow (unique; duplicate LHS triggers validation error).
     by_stage : dict[str, list[FormulaRow]]
         stage -> list of FormulaRow in declaration order.
-    parents_of : dict[str, frozenset[str]]
-        lhs -> frozenset of parent variable names.
+    parents_of : dict[str, tuple[str, ...]]
+        lhs -> tuple of parent variable names in CSV declaration order.
     variables : list[VariableRow]
         All rows from v5_variables.csv.
     external_inputs : list[ExternalInputRow]

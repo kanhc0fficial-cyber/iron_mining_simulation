@@ -479,9 +479,8 @@ class TestV5LabStage:
         """Lab values are finite floats (not NaN) given immediate report_time=0."""
         val = engine_after_5_steps.store.get("lab_tm_overflow_tfe")
         assert isinstance(val, float)
-        # With report_time=0 and sigma~0.001, value should be near 60 pct
-        assert not math.isnan(val) or True  # allow NaN if timing not yet met
-        # If not NaN, should be near 60 pct TFe
+        # With report_time=0 and sigma~0.001, value should be near 60 pct TFe.
+        # NaN is acceptable only if report_time has not yet been reached.
         if not math.isnan(val):
             assert 55.0 < val < 65.0
 

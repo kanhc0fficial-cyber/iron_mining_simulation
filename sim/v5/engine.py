@@ -83,7 +83,6 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "availability_iin{0,1},i": 1.0,
     "xi_common": 0.0, "xi_i": 0.0,
     "C_nom": 0.37, "k_load_C": 0.001,
-    "M_nom_i": 265.0,
     "k_clay_C": 0.01,
     "clay_i": 0.05, "clay_1": 0.05, "clay_2": 0.05, "clay_3": 0.05,
     "xi_C_i": 0.0,

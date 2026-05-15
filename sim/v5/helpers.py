@@ -338,7 +338,7 @@ def build_helpers_namespace(rng=None) -> dict:
         # sat_act helper (actuator saturation, used in u_actual)
         "sat_act": lambda u_sp, u_min, u_max, tau_act: clip(u_sp, u_min, u_max),
         # integral helper stub (controller integral — returns 0 for skeleton)
-        "integral": lambda e: 0.0,
+        "integral": lambda error: 0.0,
         # Conditional helper: ifelse(condition, true_val, false_val)
         "ifelse": lambda cond, tv, fv: float(tv) if cond else float(fv),
         # standardized helper: simplified normalization — returns mean of inputs.

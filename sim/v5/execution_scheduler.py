@@ -89,19 +89,19 @@ class ExecutionScheduler:
         for stage, formulas in registry.by_stage.items():
             if stage in step_stages:
                 continue
-            missing_runtime = [f for f in formulas if f.formula_role in _RUNTIME_ROLES]
-            if not missing_runtime:
+            runtime_formulas = [f for f in formulas if f.formula_role in _RUNTIME_ROLES]
+            if not runtime_formulas:
                 continue
             if (
                 stage in _ALLOWED_UNSCHEDULED_DEFINITION_STAGES
-                and all(f.formula_role == "definition" for f in missing_runtime)
+                and all(f.formula_role == "definition" for f in runtime_formulas)
             ):
                 continue
             uncovered.append(stage)
         if uncovered:
             raise ValueError(
                 "The following formula stages contain runtime formulas "
-                f"({_RUNTIME_ROLES}) but have "
+                f"({sorted(_RUNTIME_ROLES)}) but have "
                 f"no row in v5_execution_steps.csv: {sorted(uncovered)}. "
                 "Add the missing stage(s) to v5_execution_steps.csv."
             )

@@ -358,6 +358,7 @@ class TestExecutionScheduler:
         assert called_stages == {"boundary"}
 
     def test_run_step_unknown_stage_raises(self, scheduler):
+        # Intentional typo to verify fail-fast behavior for unknown stage names.
         with pytest.raises(ValueError, match="Unknown stage name"):
             scheduler.run_step(lambda f: None, stages=["boundray"])
 

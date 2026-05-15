@@ -278,11 +278,11 @@ also includes the `template_placeholders=N` count for transparency.
 
 ## PR-2 Second-pass Findings (2026-05-15, script-angle + manual logic walkthrough)
 
-本轮按“换角度脚本测试 + 手工推演”新增发现 2 个问题（均**尚未修复**，先记录给后续 PR 处理）。
+本轮按“换角度脚本测试 + 手工推演”新增发现 2 个问题，现已在本次提交修复。
 
 ### BUG-PR2-R2-1 · `ExecutionScheduler` 对「仅 definition 公式但无 execution step」阶段无告警，导致静默漏调度
 
-**Status: ⚠️ OPEN**  
+**Status: ✅ FIXED**  
 **File:** `sim/v5/execution_scheduler.py` (guard at lines 85-90)
 
 **现象（脚本复现）：**
@@ -308,15 +308,16 @@ _RUNTIME_ROLES = frozenset({"executable", "definition"})
 - 一旦未来某阶段只含 `definition`（但设计上需要参与运行）且漏配 execution step，会被悄悄吞掉；
 - 调度完整性保护不一致，容易形成“看似启动正常、实则漏执行”的隐性错误。
 
-**建议：**
-- 覆盖校验从 `"executable"` 扩展为 `_RUNTIME_ROLES`；
-- 或显式定义并校验“哪些 definition 允许不进入 execution step（如 global helper）”。
+**修复：**
+- 覆盖校验从仅 `"executable"` 扩展为运行期角色集合 `_RUNTIME_ROLES`；
+- 对 `global` 这种“仅 definition 的 helper stage”增加显式白名单（允许不出现在 execution steps）；
+- 其他未覆盖运行期 stage 继续 fail-fast 抛错。
 
 ---
 
 ### BUG-PR2-R2-2 · `run_step(stages=...)` 对拼写错误阶段静默 no-op，缺少 fail-fast
 
-**Status: ⚠️ OPEN**  
+**Status: ✅ FIXED**  
 **File:** `sim/v5/execution_scheduler.py` (run_step lines 174-179)
 
 **现象（脚本复现）：**
@@ -330,15 +331,15 @@ _RUNTIME_ROLES = frozenset({"executable", "definition"})
 - 上层调用出现拼写错误时不会暴露，可能让仿真/回放管道“成功返回但未执行任何阶段”；
 - 对排障不友好，属于典型 silent failure。
 
-**建议：**
-- 在 `run_step` 入口校验 `stages` 子集关系，遇到未知 stage 直接抛 `ValueError`；
-- 异常信息应包含未知阶段名和可选合法阶段列表。
+**修复：**
+- 在 `run_step` 入口新增 `stages` 合法性校验；
+- 遇到未知 stage 直接抛 `ValueError`，并给出未知阶段与合法阶段列表。
 
 ---
 
-## 本轮新增问题汇总（未修复）
+## 本轮新增问题汇总（已修复）
 
 | ID | Severity | Fixed? | Module |
 |----|----------|--------|--------|
-| BUG-PR2-R2-1 | High | ⚠️ Open | `execution_scheduler.py` |
-| BUG-PR2-R2-2 | Medium | ⚠️ Open | `execution_scheduler.py` |
+| BUG-PR2-R2-1 | High | ✅ Fixed | `execution_scheduler.py` |
+| BUG-PR2-R2-2 | Medium | ✅ Fixed | `execution_scheduler.py` |

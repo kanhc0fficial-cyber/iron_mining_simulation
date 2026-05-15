@@ -37,6 +37,10 @@ _RUNTIME_ROLES = frozenset({"executable", "definition"})
 # Statuses with manual authority — must appear in the execution plan.
 _MANUAL_STATUSES = frozenset({"manual_override", "manual_closure", "manual_promoted"})
 
+# Definition-only helper stages that are intentionally not dispatched as
+# standalone execution steps (they are inlined by evaluators).
+_ALLOWED_UNSCHEDULED_DEFINITION_STAGES = frozenset({"global"})
+
 
 class ExecutionScheduler:
     """Stage-ordered dispatcher for V5 formula execution.
@@ -76,21 +80,28 @@ class ExecutionScheduler:
                     f for f in raw if f.formula_role in _RUNTIME_ROLES
                 ]
 
-        # Guard: raise if any registry stage has executable formulas that are not
+        # Guard: raise if any registry stage has runtime formulas that are not
         # covered by any execution step.  This prevents silent formula omission
         # when a new stage is added to the formula CSV but its execution step row
-        # is forgotten (BUG-1 class of failure).
+        # is forgotten (BUG-1 / BUG-PR2-R2-1 class of failure).
         step_stages = frozenset(self._steps_by_stage)
         uncovered: List[str] = []
         for stage, formulas in registry.by_stage.items():
             if stage in step_stages:
                 continue
-            missing_exec = [f for f in formulas if f.formula_role == "executable"]
-            if missing_exec:
-                uncovered.append(stage)
+            missing_runtime = [f for f in formulas if f.formula_role in _RUNTIME_ROLES]
+            if not missing_runtime:
+                continue
+            if (
+                stage in _ALLOWED_UNSCHEDULED_DEFINITION_STAGES
+                and all(f.formula_role == "definition" for f in missing_runtime)
+            ):
+                continue
+            uncovered.append(stage)
         if uncovered:
             raise ValueError(
-                "The following formula stages contain 'executable' formulas but have "
+                "The following formula stages contain runtime formulas "
+                f"({_RUNTIME_ROLES}) but have "
                 f"no row in v5_execution_steps.csv: {sorted(uncovered)}. "
                 "Add the missing stage(s) to v5_execution_steps.csv."
             )
@@ -170,8 +181,21 @@ class ExecutionScheduler:
         stages :
             Optional whitelist of stage names to execute.  If ``None``,
             all stages are executed.
+
+        Raises
+        ------
+        ValueError
+            If ``stages`` contains unknown stage names.
         """
         target_stages = set(stages) if stages is not None else None
+        if target_stages is not None:
+            known_stages = set(self.ordered_stages())
+            unknown = sorted(target_stages - known_stages)
+            if unknown:
+                raise ValueError(
+                    f"Unknown stage name(s) in run_step(stages=...): {unknown}. "
+                    f"Valid stage names: {sorted(known_stages)}."
+                )
         for stage in self.ordered_stages():
             if target_stages is not None and stage not in target_stages:
                 continue

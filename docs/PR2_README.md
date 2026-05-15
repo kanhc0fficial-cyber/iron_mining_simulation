@@ -148,8 +148,8 @@ for step in range(n_steps):
 | BUG-3 | 中 | ✅ 已修复 | 新增 `StateStore.has()` 方法，消除 `get_or_none()` 对 `None` 值的歧义 |
 | BUG-4 | 中 | ✅ 已修复 | `advance()` 保存 `previous_dcs`；新增 `flush_dcs()` 推荐写法 |
 | BUG-5 | 中 | ⚠️ 已文档化 | 只保留 1 步历史，多步延迟需外部 `DelayBuffer` |
-| BUG-PR2-R2-1 | 高 | ⚠️ 待处理 | 调度器覆盖校验只检查 `executable`，对“仅 definition 且缺 execution step”阶段会静默漏调度 |
-| BUG-PR2-R2-2 | 中 | ⚠️ 待处理 | `run_step(stages=...)` 对未知阶段名静默 no-op，拼写错误不会 fail-fast |
+| BUG-PR2-R2-1 | 高 | ✅ 已修复 | 调度器未覆盖 stage 校验已扩展到运行期角色，并为 `global` definition-helper 设定显式例外 |
+| BUG-PR2-R2-2 | 中 | ✅ 已修复 | `run_step(stages=...)` 已对未知阶段名 fail-fast 抛 `ValueError` |
 
 完整描述见 [`docs/PR2_BUG_REPORT.md`](./PR2_BUG_REPORT.md)。
 
@@ -159,7 +159,7 @@ for step in range(n_steps):
 
 - 采用“换角度脚本测试 + 手工读码推演”对 PR2 三模块复审；
 - 当前仓库基线验证通过：`pytest tests/`（786 passed）、`scripts/calibrate.py`、`scripts/run_simulation.py --steps 100`；
-- 新增发现 2 个未修复调度层问题（见 BUG-PR2-R2-1 / BUG-PR2-R2-2），本次仅先落文档，后续由你接手处理代码修复。
+- 新增发现的 2 个调度层问题（BUG-PR2-R2-1 / BUG-PR2-R2-2）已在后续提交完成修复并补充测试覆盖。
 
 ---
 

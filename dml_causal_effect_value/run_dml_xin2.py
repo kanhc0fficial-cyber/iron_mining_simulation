@@ -156,7 +156,8 @@ def load_data(dataset_path: str, treatment_col: str):
         )
 
     Y = df[Y_COL].values.astype(np.float32)
-    T = df[treatment_col].values.astype(np.float32)
+    t_mean = df[treatment_col].mean()
+    T = df[treatment_col].ffill().fillna(t_mean).values.astype(np.float32)
 
     # 混杂变量：去除 Y 列、另一条线的 Y 列、处理变量 T、浮选化验泄漏列
     exclude_cols = {Y_COL, OTHER_Y_COL, treatment_col}
@@ -262,10 +263,9 @@ def fit_histgbdt_temporal(X_full: np.ndarray, y: np.ndarray,
     y_tr = y[train_idx_sub]
 
     # 处理 NaN（滞后特征在序列开头可能产生 NaN，用列均值填充）
+    col_means = np.nanmean(X_tr, axis=0).astype(np.float32)
     nan_mask = np.isnan(X_tr)
     if nan_mask.any():
-        col_means = np.where(nan_mask.any(axis=0),
-                             np.nanmean(X_tr, axis=0), 0.0)
         X_tr = np.where(nan_mask, col_means, X_tr)
 
     model = HistGradientBoostingRegressor(
@@ -369,7 +369,7 @@ def run_dml(Y: np.ndarray, T: np.ndarray, X_full: np.ndarray,
         # ── T-nuisance：用 X 预测 T ──────────────────────────────────────
         t_model, t_col_means = fit_histgbdt_temporal(
             X_full, t_train, train_global, csum,
-            TEMPORAL_LAGS, TEMPORAL_WINDOWS, random_state=RANDOM_SEED + fold_k
+            TEMPORAL_LAGS, TEMPORAL_WINDOWS, random_state=RANDOM_SEED + fold_k + N_FOLDS
         )
         T_hat = predict_histgbdt_temporal(
             t_model, X_full, test_global, csum,

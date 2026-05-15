@@ -317,3 +317,364 @@ def dependency_list(self, lhs: str) -> FrozenSet[str]:
 | 观察-PR8-C | `dependency_list()` 返回无序集合 | API 语义偏差 | 低~中 |
 
 按你的要求：**上述问题仅记录，未在本次提交中修复。**
+
+---
+
+## PR #9：PR3 staged engine + 脚本复测问题记录（2026-05-15）
+
+本节记录对当前分支新增的 V5 staged engine（`sim/v5/helpers.py` / `sim/v5/formula_evaluator.py` / `sim/v5/engine.py`）做的额外脚本测试与人工代码审查结果。
+
+按你的要求：**只记录问题，不修复实现。**
+
+### 本轮额外脚本测试
+
+已执行：
+
+```bash
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/calibrate.py
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/review_v5_spec_loader.py
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/run_simulation.py --steps 5 --no-warmup --format csv --output /tmp/iron_sim_review.csv
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/run_simulation.py --steps 5 --no-warmup --format parquet --output /tmp/iron_sim_review.parquet
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/leakage_check.py --input /tmp/iron_sim_review.csv --top 5
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/redesign_formula_docs/validate_v5_clean_spec.py
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/run_simulation.py --steps -1 --no-warmup --format csv --output /tmp/neg_steps.csv
+```
+
+结果摘要：
+
+- `calibrate.py`：通过
+- `review_v5_spec_loader.py`：**当前已全部 PASS**，说明前一节 PR8 中记录的 loader 结构问题在当前代码上已不可复现
+- `run_simulation.py`：5 步 CSV / parquet 冒烟均可运行
+- `leakage_check.py`：在 5 步样本上输出全 NaN（样本量过小，暂不单独记为 bug）
+- `validate_v5_clean_spec.py`：通过
+- `run_simulation.py --steps -1`：**暴露新问题**，见 BUG-PR9-A
+
+---
+
+### BUG-PR9-A：CLI 接受负步数并返回成功，但可能根本不产出文件
+
+**现象**：
+
+```bash
+python scripts/run_simulation.py --steps -1 --no-warmup --format csv --output /tmp/neg_steps.csv
+```
+
+输出为：
+
+```text
+[仿真] 开始仿真 -1 步 ...
+[仿真] 完成！耗时 0.00s，输出 → /tmp/neg_steps.csv
+EXIT:0
+```
+
+但 `/tmp/neg_steps.csv` 并未生成。
+
+**根本原因**：
+
+CLI 对 `--steps` 只做了 `int` 解析，没有校验正数：
+
+```python
+# scripts/run_simulation.py
+parser.add_argument("--steps", type=int, default=None, ...)
+...
+n_steps = args.steps if args.steps is not None else sim_cfg.n_steps
+sim.run_steps(n_steps)
+```
+
+而底层执行是：
+
+```python
+# sim/simulator.py
+for t in range(n_steps):
+    self._step(t, write=True)
+self._writer.close()
+```
+
+`range(-1)` 直接是空循环，所以脚本以“成功”结束，但没有任何真实仿真步发生。对应位置：
+
+- `scripts/run_simulation.py:24-29, 90-97`
+- `sim/simulator.py:95-99`
+
+**影响**：
+
+- 调用方会误以为仿真已正常完成
+- CI / shell 脚本如果只看退出码，会把“零步且无输出”的情况当成功
+- 对数据流水线而言，这比显式报错更危险，因为它是静默失败
+
+**建议**：
+
+- CLI 层显式校验 `steps > 0`
+- 或在 `Simulator.run_steps()` 中拒绝非正整数
+
+---
+
+### BUG-PR9-B：lab 报告时间门控失效；`report_time > 0` 时结果会永久停留为 NaN
+
+**现象（定向复现）**：
+
+将 `report_time_tm_overflow_tfe=120.0`、`report_time_mag_mixed_conc_tfe=120.0`，
+然后运行 10 步（总时间 600 s）后，两个 lab 结果仍然是 `NaN`。
+
+**根本原因**：
+
+`lab_sample_template()` 依赖 keyword-only 参数 `step_time`：
+
+```python
+# sim/v5/helpers.py
+def lab_sample_template(..., *, step_time: float = 0.0, ...):
+    if float(step_time) < float(report_time):
+        return float("nan")
+```
+
+但 eval namespace 里注册的 wrapper 仍然使用默认值 `step_time=0.0`：
+
+```python
+def _lab_sample_template(..., step_time=0.0):
+    return lab_sample_template(..., step_time=step_time, rng=rng)
+```
+
+而 evaluator 虽然把当前步时钟写进了 namespace，
+写入的名字却是 `_step_time`，并没有注入到 `lab_sample_template(...)` 调用里：
+
+```python
+# sim/v5/formula_evaluator.py
+ns["_step_time"] = step_time
+result = eval(expr, {"__builtins__": {}}, ns)
+```
+
+对应位置：
+
+- `sim/v5/helpers.py:139-179`
+- `sim/v5/helpers.py:300-305`
+- `sim/v5/formula_evaluator.py:177-180, 224-228`
+
+**影响**：
+
+- 只要 `report_time > 0`，当前实现中的 lab 公式就永远不会“到点发布”
+- 现在测试通过，主要是因为默认参数把 `report_time_*` 设成了 0
+- 一旦后续把真实 sample/report delay 接回去，lab/label 时序会直接坏掉
+
+**建议**：
+
+- 明确把当前 `step_time` 传入 `lab_sample_template`
+- 不要依赖 wrapper 的默认 `step_time=0.0`
+
+---
+
+### BUG-PR9-C：缺少当前步父节点时，evaluator 会偷偷回退到上一时刻值
+
+**现象（定向复现）**：
+
+对公式 `Q_conc`，只在 `store.previous` 中放 `M_conc_solid=123.0`，
+`store.current` 不放该变量，`eval_formula()` 仍然能成功算出结果，而不是报“当前依赖缺失”。
+
+**根本原因**：
+
+namespace 构建时，previous state 被同时注入成：
+
+```python
+for k, v in store.previous.items():
+    ns[k] = v
+    ns[f"{k}_prev"] = v
+```
+
+这意味着：
+
+- `X_prev` 会正确映射到上一时刻
+- **但 `X` 也会被上一时刻值填充**
+
+如果某个本应来自“当前步上游公式”的父节点还没算出来，
+evaluator 不会报缺失，而是静默用旧值顶上。对应位置：
+
+- `sim/v5/formula_evaluator.py:169-175`
+
+**影响**：
+
+- 会掩盖 stage 内执行顺序错误
+- 会掩盖“上游公式没执行/执行失败”的问题
+- 结果看起来能跑，但其实混入了 stale state，最难排查
+
+**建议**：
+
+- 只把 previous state 注入到 `X_prev`
+- 当前步普通父节点缺失时，应显式失败
+
+---
+
+### BUG-PR9-D：V5 engine 在大量公式失败时仍然整体返回成功，错误只写入 `skipped`
+
+**现象（定向复现）**：
+
+跑 1 步 V5 engine：
+
+```text
+executed 97
+skipped 329
+Counter({'Unsupported': 233, 'SyntaxError': 95, 'FormulaEval': 1})
+```
+
+其中很多失败是明确的公式不可执行（例如模板变量名导致 `SyntaxError`），
+但 `engine.run()` 仍然正常返回，没有抛错。
+
+**根本原因**：
+
+`_eval_and_store()` 捕获 `UnsupportedFormulaError` / `FormulaEvaluationError` 后，
+只记录到 `self.skipped`，然后返回 `None`：
+
+```python
+except UnsupportedFormulaError as exc:
+    self.skipped[formula.lhs] = ...
+    return None
+except FormulaEvaluationError as exc:
+    self.skipped[formula.lhs] = ...
+    return None
+```
+
+对应位置：
+
+- `sim/v5/engine.py:570-592`
+
+**影响**：
+
+- 从 API 视角看，`run()` 成功了；但从语义看，大部分公式根本没执行
+- 当前测试只验证“每个 stage 至少有一些输出”，掩盖了“多数公式仍失败”的事实
+- 后续如果有人把这个 engine 接到 CLI / 数据生成流程里，极易把残缺结果当完整结果消费
+
+**建议**：
+
+- 至少为“存在 skipped”提供 fail-fast 模式
+- 或把 skipped 计数提升为显式运行状态，而不是仅靠调用方自己读 dict
+
+---
+
+### BUG-PR9-E：带模板占位符的变量名直接进入 `eval()`，导致大量 SyntaxError
+
+**现象**：
+
+例如：
+
+- `E_air_{s,c}`
+- `Q_air_{s,c}`
+- `fx_s{s}_{c}_froth_h`
+
+这些名字在 Python 语法里并不是合法标识符。
+当前实现对 RHS 的预处理只有：
+
+- `^ -> **`
+- 去掉行尾注释
+
+并不会先把模板变量展开或重写成合法名字。对应位置：
+
+```python
+def preprocess_rhs(rhs: str) -> str:
+    expr = rhs.replace("^", "**")
+    expr = re.sub(r"\s*#[^\n]*$", "", expr).strip()
+    return expr
+```
+
+对应位置：
+
+- `sim/v5/formula_evaluator.py:73-93`
+
+另外，`DEFAULT_PARAMS` 中也直接放了这些带花括号的键：
+
+- `Q_pump_pool_{s,1}`
+- `Q_air_{s,c}`
+- `fx_s{s}_{c}_froth_h`
+
+对应位置：
+
+- `sim/v5/engine.py:310-311`
+- `sim/v5/engine.py:336-339`
+- `sim/v5/engine.py:356-367`
+
+**影响**：
+
+- 只要遇到未展开模板名，eval 就会在语法层面失败
+- 这也是上面 95 个 `SyntaxError` 的直接来源之一
+- 当前 engine 更像“部分公式可跑的 skeleton”，还不能视为完整可执行层
+
+**建议**：
+
+- 在 eval 前做模板实例化 / 名称正规化
+- 或建立显式 AST / helper 执行层，避免把带模板标识符的原始 RHS 直接交给 Python parser
+
+---
+
+### BUG-PR9-F：两个 helper 仍是“占位语义”，与 V5 规格含义不一致
+
+#### F1. `topology_feed_j_rate()` 忽略槽间级联关系
+
+当前实现：
+
+```python
+def topology_feed_j_rate(stage_index, series, Q_feed_s, feed_grade_j_s, **kwargs):
+    return float(Q_feed_s) * float(feed_grade_j_s)
+```
+
+但函数注释自己也承认，V5 规格需要的是 cascade：
+
+```python
+Q_in[0] = Q_total_s
+Q_in[c] = Q_out[c-1]
+```
+
+对应位置：
+
+- `sim/v5/helpers.py:187-213`
+
+**影响**：
+
+- `feed_j_rate_{s,c}` 目前没有体现 cell-by-cell 拓扑
+- 浮选每槽的进料关系被压平为同一个标量
+
+#### F2. `standardized()` 实际返回原始输入均值，不是标准化结果
+
+当前实现：
+
+```python
+"standardized": lambda *args: sum(float(a) for a in args) / max(len(args), 1),
+```
+
+对应位置：
+
+- `sim/v5/helpers.py:344-346`
+
+而从函数名和 DCS proxy 语义看，它本应产生“标准化后的 proxy”，不是简单平均。
+
+**影响**：
+
+- `online_froth_proxy` / `online_load_proxy` 变成对原始量纲的均值聚合
+- 不同量纲（液位/流量/频率/压力/电流）直接平均，物理含义不成立
+- 实测一组默认参数下，两个 proxy 输出分别约为 `8.38` 和 `95.71`，已经明显不是“标准化信号”
+
+**建议**：
+
+- 这两个 helper 在后续实现里应被视为未完成项，而不是最终逻辑
+
+---
+
+## 本轮结论
+
+本轮“脚本复测 + 手动读代码”确认：
+
+1. 旧的 PR8 loader 审查问题在当前代码上已不可复现；
+2. 但 PR3 新增的 staged engine 仍存在多处结构性问题；
+3. 其中影响最大的不是“小公式误差”，而是：
+   - lab 时序门控失效
+   - 当前/上一时刻依赖混淆
+   - 大量公式失败却整体返回成功
+   - 模板标识符未实例化就直接喂给 `eval()`
+
+建议优先级：
+
+| 编号 | 描述 | 类型 | 建议优先级 |
+|------|------|------|----------|
+| BUG-PR9-B | lab `report_time` 门控失效 | 时序逻辑错误 | P1 |
+| BUG-PR9-C | 缺少当前步父节点时回退到上一时刻 | 状态依赖错误 | P1 |
+| BUG-PR9-D | 大量公式失败但 engine 仍返回成功 | 运行状态错误 | P1 |
+| BUG-PR9-E | 模板标识符未展开直接 `eval` | 执行层缺陷 | P1 |
+| BUG-PR9-A | CLI 接受负步数并报成功 | CLI / 脚本健壮性 | P2 |
+| BUG-PR9-F | helper 仍是占位语义 | 规格偏离 | P2 |
+
+按你的要求：**上述问题仅记录，未在本次提交中修复。**

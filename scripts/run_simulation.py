@@ -6,6 +6,7 @@
   python scripts/run_simulation.py
   python scripts/run_simulation.py --steps 100 --format csv --output /tmp/out.csv
   python scripts/run_simulation.py --no-warmup --seed 123
+  python scripts/run_simulation.py --engine v5 --steps 10 --output output/v5_quick.parquet
 """
 
 from __future__ import annotations
@@ -24,8 +25,12 @@ from sim.simulator import Simulator
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="东鞍山选矿DCS仿真系统")
     parser.add_argument(
+        "--engine", choices=["legacy", "v5"], default="legacy",
+        help="仿真后端（默认：legacy；v5 使用 V5 规格引擎）",
+    )
+    parser.add_argument(
         "--steps", type=int, default=None,
-        help="仿真步数（默认：SimConfig.n_steps = 43200）",
+        help="仿真步数（默认：SimConfig.n_steps = 43200；v5 引擎默认 43200）",
     )
     parser.add_argument(
         "--output", type=str, default="output/simulation.parquet",
@@ -41,11 +46,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--no-warmup", action="store_true",
-        help="跳过预热阶段",
+        help="跳过预热阶段（仅 legacy 引擎）",
     )
     parser.add_argument(
         "--open-loop", action="store_true",
-        help="开环激励模式（PRBS 加药 + 扩大扰动方差）",
+        help="开环激励模式（PRBS 加药 + 扩大扰动方差；仅 legacy 引擎）",
     )
     parser.add_argument(
         "--assay-interval-min", type=int, default=None,
@@ -61,6 +66,34 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # -----------------------------------------------------------------------
+    # V5 engine backend
+    # -----------------------------------------------------------------------
+    if args.engine == "v5":
+        from sim.v5.v5_runner import V5Runner
+
+        n_steps = args.steps if args.steps is not None else 43200
+        if n_steps <= 0:
+            raise ValueError(f"--steps 必须是正整数，得到 {n_steps!r}")
+
+        print(f"[仿真 V5] 开始仿真 {n_steps} 步 ...", flush=True)
+        t0 = time.perf_counter()
+
+        runner = V5Runner(
+            output_path=args.output,
+            fmt=args.format,
+            n_steps=n_steps,
+            seed=args.seed,
+        )
+        runner.run()
+
+        elapsed = time.perf_counter() - t0
+        print(f"[仿真 V5] 完成！耗时 {elapsed:.2f}s，输出 → {args.output}")
+        return
+
+    # -----------------------------------------------------------------------
+    # Legacy engine backend (default)
+    # -----------------------------------------------------------------------
     sim_cfg = SimConfig(seed=args.seed, open_loop=args.open_loop)
     dist_cfg = DisturbanceConfig()
     ball_cfg = BallMillConfig()

@@ -94,6 +94,8 @@ class Simulator:
 
     def run_steps(self, n_steps: int) -> None:
         """运行指定步数（用于快速验证），写入输出。"""
+        if n_steps <= 0:
+            raise ValueError(f"n_steps 必须是正整数，得到 {n_steps!r}")
         for t in range(n_steps):
             self._step(t, write=True)
         self._writer.close()

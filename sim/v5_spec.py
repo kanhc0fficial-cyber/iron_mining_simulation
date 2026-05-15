@@ -14,6 +14,7 @@ CSV_FIRST_DATA_ROW_NUMBER = 2
 class V5ExecutableFormula:
     formula_id: str
     stage: str
+    source_v4_line: str
     lhs: str
     rhs: str
     parents: str
@@ -118,6 +119,7 @@ def load_v5_clean_spec(repo_root: Path | str | None = None) -> V5CleanSpec:
         V5ExecutableFormula(
             formula_id=_require_non_empty(row["formula_id"], "formula_id", formulas_file, i),
             stage=_require_non_empty(row["stage"], "stage", formulas_file, i),
+            source_v4_line=row.get("source_v4_line", "").strip(),
             lhs=_require_non_empty(row["lhs"], "lhs", formulas_file, i),
             rhs=_require_non_empty(row["rhs"], "rhs", formulas_file, i),
             parents=row["parents"].strip(),

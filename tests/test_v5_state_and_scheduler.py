@@ -357,6 +357,11 @@ class TestExecutionScheduler:
         scheduler.run_step(evaluator, stages=["boundary"])
         assert called_stages == {"boundary"}
 
+    def test_run_step_unknown_stage_raises(self, scheduler):
+        # Intentional typo to verify fail-fast behavior for unknown stage names.
+        with pytest.raises(ValueError, match="Unknown stage name"):
+            scheduler.run_step(lambda f: None, stages=["boundray"])
+
     def test_run_step_boundary_formulas_called_before_magnetic(self, scheduler):
         """boundary formulas are called before magnetic in run_step order."""
         seen_stages: list = []
@@ -414,6 +419,28 @@ class TestExecutionScheduler:
                         f"Executable formula {formula.formula_id} ({formula.lhs!r}, "
                         f"stage={stage!r}) is NOT dispatched by the scheduler."
                     )
+
+    def test_definition_only_stage_without_execution_step_raises(self, registry):
+        """Uncovered runtime stage (definition-only) should fail fast (BUG-PR2-R2-1)."""
+        base = registry.formulas[0]
+        ghost = base._replace(
+            formula_id="TEMP_DEF_ONLY_STAGE_001",
+            stage="ghost_stage_def_only",
+            lhs="ghost_stage_def_only_lhs",
+            formula_role="definition",
+            status="canonical",
+        )
+        mutated = FormulaRegistry(
+            formulas=list(registry.formulas) + [ghost],
+            variables=list(registry.variables),
+            external_inputs=list(registry.external_inputs),
+            dcs_outputs=list(registry.dcs_outputs),
+            constraints=list(registry.constraints),
+            causal_edges=list(registry.causal_edges),
+            execution_steps=list(registry.execution_steps),
+        )
+        with pytest.raises(ValueError, match="ghost_stage_def_only"):
+            ExecutionScheduler(mutated)
 
 
 # ---------------------------------------------------------------------------

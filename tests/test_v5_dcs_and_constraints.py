@@ -233,9 +233,12 @@ class TestMeasSensor:
     def test_meas_sensor_noise_adds_variation(self):
         """meas_sensor with sigma_noise>0 introduces variation across calls."""
         import random
+        import statistics
         rng = random.Random(42)
-        vals = [meas_sensor(10.0, sigma_noise=1.0, rng=rng) for _ in range(20)]
-        assert min(vals) != max(vals)  # should vary
+        vals = [meas_sensor(10.0, sigma_noise=1.0, rng=rng) for _ in range(50)]
+        # At least 5 distinct values and non-zero standard deviation
+        assert len(set(vals)) >= 5
+        assert statistics.stdev(vals) > 0.0
 
     def test_meas_sensor_drift(self):
         """meas_sensor applies drift linearly with time."""

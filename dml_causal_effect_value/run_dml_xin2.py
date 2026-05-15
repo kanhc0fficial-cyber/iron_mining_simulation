@@ -179,13 +179,17 @@ def load_data(dataset_path: str, treatment_col: str):
 
 
 def preprocess_features(X_raw: np.ndarray):
-    """方差过滤 + NaN 填充 + 标准化，返回预处理后的特征矩阵及变换器。"""
+    """方差过滤 + NaN 填充，返回预处理后的特征矩阵及变换器。
+
+    VarianceThreshold 仅过滤列（特征），不改变行顺序，因此 DataFrame 中
+    行仍保持原始时间升序，前向填充（ffill）不会引入未来信息泄漏。
+    """
     # 方差过滤
     vt = VarianceThreshold(threshold=1e-4)
     X_vt = vt.fit_transform(X_raw)
     print(f"[特征预处理] 方差过滤后：{X_vt.shape[1]}/{X_raw.shape[1]} 个特征")
 
-    # NaN 填充（前向填充 + 均值兜底）
+    # NaN 填充：前向填充（历史值替代缺失）+ 列均值兜底（头部无历史可填时）
     X_df = pd.DataFrame(X_vt).ffill()
     col_means = X_df.mean()
     X_clean = X_df.fillna(col_means).values.astype(np.float32)
@@ -243,7 +247,8 @@ def fit_histgbdt_temporal(X_full: np.ndarray, y: np.ndarray,
                           train_global_idx: np.ndarray,
                           csum: np.ndarray,
                           lags: list, windows: list,
-                          random_state: int = RANDOM_SEED) -> HistGradientBoostingRegressor:
+                          random_state: int = RANDOM_SEED
+                          ) -> tuple[HistGradientBoostingRegressor, np.ndarray]:
     """在 train_global_idx 指定的行上拟合 HistGBDT-Temporal 模型。
 
     注意：train_global_idx 为全局时间索引（相对于 X_full），
@@ -354,7 +359,7 @@ def run_dml(Y: np.ndarray, T: np.ndarray, X_full: np.ndarray,
         # ── Y-nuisance：用 X 预测 Y ──────────────────────────────────────
         y_model, y_col_means = fit_histgbdt_temporal(
             X_full, y_train, train_global, csum,
-            TEMPORAL_LAGS, TEMPORAL_WINDOWS, random_state=RANDOM_SEED
+            TEMPORAL_LAGS, TEMPORAL_WINDOWS, random_state=RANDOM_SEED + fold_k
         )
         Y_hat = predict_histgbdt_temporal(
             y_model, X_full, test_global, csum,
@@ -432,7 +437,8 @@ def run_dml(Y: np.ndarray, T: np.ndarray, X_full: np.ndarray,
 #  结果保存与可视化
 # ═══════════════════════════════════════════════════════════════════════════
 
-def save_results(result: dict, treatment_col: str, df_index: pd.DatetimeIndex):
+def save_results(result: dict, treatment_col: str, df_index: pd.DatetimeIndex,
+                 n_folds: int):
     """将 θ 估计结果和残差序列保存为 CSV，并绘制诊断散点图。"""
     os.makedirs(RESULT_DIR, exist_ok=True)
 
@@ -445,7 +451,7 @@ def save_results(result: dict, treatment_col: str, df_index: pd.DatetimeIndex):
         "95% CI 下界":      round(result["ci_lo"], 6),
         "95% CI 上界":      round(result["ci_hi"], 6),
         "有效样本数":        result["n_effective"],
-        "折数 K":           N_FOLDS,
+        "折数 K":           n_folds,
         "基学习器":         "HistGBDT-Temporal",
     }])
     theta_csv = os.path.join(RESULT_DIR, "dml_theta_xin2.csv")
@@ -503,7 +509,7 @@ def save_results(result: dict, treatment_col: str, df_index: pd.DatetimeIndex):
     ax2.axhline(0, color="gray", linewidth=0.8, linestyle="--")
     ax2.set_xlabel("有效化验样本序号", fontsize=10)
     ax2.set_ylabel("DML 残差（Ỹ - θ·T̃）", fontsize=10)
-    ax2.set_title("DML 残差时序（用于检验工具变量/自相关假设）", fontsize=10)
+    ax2.set_title("DML 残差时序（用于检验同方差性与自相关假设）", fontsize=10)
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -572,7 +578,7 @@ def main():
     result = run_dml(Y, T, X_full, n_folds=N_FOLDS)
 
     # 4. 保存结果
-    save_results(result, treatment_col, df_index)
+    save_results(result, treatment_col, df_index, n_folds=N_FOLDS)
 
     # 5. 终端汇总输出
     print("\n" + "=" * 65)

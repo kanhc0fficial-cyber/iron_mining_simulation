@@ -149,3 +149,171 @@ Q_in_cell = Q_total_s / _N_CELLS   # 均匀分配，无级联
 ---
 
 *生成于仿真系统 PR #4 代码审查 + 冒烟测试，2026-05-12*
+
+---
+
+## PR #8：V5 spec loader 反向审查（2026-05-15）
+
+本节记录对当前 PR（`sim/v5/spec_loader.py`）做的“换角度”审查。
+按你的要求：**只记录问题，不修改实现**。
+
+### 新增审查脚本
+
+已新增脚本：
+
+```bash
+python /home/runner/work/iron_mining_simulation/iron_mining_simulation/scripts/review_v5_spec_loader.py
+```
+
+脚本思路：
+
+1. 先加载真实 V5 CSV，确认当前 PR 基本功能正常；
+2. 再对临时副本做变异（duplicate lhs / invalid status / missing manual_override / unknown parent / duplicate formula_id / missing variable row）；
+3. 观察 loader 是否能拒绝这些坏规格；
+4. 额外检查 `dependency_list()` 的 API 语义是否真的是“list”。
+
+本次脚本输出摘要：
+
+```text
+- [PASS] baseline_load
+- [PASS] duplicate_lhs_rejected
+- [PASS] invalid_status_rejected
+- [PASS] missing_manual_override_rejected
+- [PASS] unknown_parent_rejected
+- [WARN] duplicate_formula_id_rejected
+- [WARN] missing_variable_row_rejected
+- [WARN] dependency_api_contract
+summary: warnings=3, total_checks=8
+```
+
+---
+
+### BUG-PR8-A：`duplicate formula_id` 未被拒绝，`by_id` 会静默覆盖
+
+**现象**：
+
+审查脚本向 `v5_executable_formulas.csv` 追加一行：
+- `formula_id` 与已有行相同
+- `lhs` 改为新值，避免触发 duplicate lhs
+
+结果：`load_spec()` **仍然成功加载**，没有报错。
+
+**根本原因**：
+
+```python
+# sim/v5/spec_loader.py
+for row in formulas:
+    self.by_id[row.formula_id] = row
+```
+
+这里直接写入 dict，没有对 `formula_id` 重复做检测；重复键会被后写入的行静默覆盖。对应位置：
+- `sim/v5/spec_loader.py:275-277`
+
+而 V5 规范校验脚本明确把 duplicate formula IDs 作为结构性问题统计：
+- `redesign_formula_docs/validate_v5_clean_spec.py:291-292`
+- `redesign_formula_docs/V5_CLEAN_AUTOCHECK.md:12`
+
+**影响**：
+- `formula_id -> formula row` 索引不再可靠
+- 坏规格可能被 loader 悄悄吞掉，后续运行时看到的是“最后一行赢”
+- 后面真正做 runtime engine 时，定位公式来源会变得不可信
+
+**建议**：
+- 在构建 `by_id` 时显式校验 duplicate `formula_id`
+
+---
+
+### BUG-PR8-B：未校验 `formulas` / `variables` 跨表一致性
+
+**现象**：
+
+审查脚本删除 `v5_variables.csv` 中 `B_eff` 对应变量行后，
+`load_spec()` **仍然成功加载**。
+
+**根本原因**：
+
+当前 loader 只是读取 `v5_variables.csv`：
+
+```python
+variables = self._load_variables()
+...
+registry = FormulaRegistry(...)
+...
+self._validate_statuses_and_roles(formulas)
+self._validate_required_statuses_present(formulas)
+self._validate_parents(registry)
+```
+
+但没有做：
+- variable 是否都有对应 formula
+- formula lhs 是否都有 variable row
+- `defined_by_formula_id` 是否与 formula 表一致
+
+对应位置：
+- `sim/v5/spec_loader.py:362-384`
+- `sim/v5/spec_loader.py:413-416`
+
+而 V5 autocheck 明确把这两项列为 hard checks：
+- `redesign_formula_docs/V5_CLEAN_AUTOCHECK.md:14-15`
+- `redesign_formula_docs/validate_v5_clean_spec.py:294-297`
+
+**影响**：
+- loader 可能接受“公式表和变量表已分叉”的规格
+- 后续如果 runtime engine 依赖 `variables` 做 state registry / schema / stage routing，可能在运行时才暴露问题
+
+**建议**：
+- 将 `variables_without_formula == 0`
+- `formulas_without_variable == 0`
+- `defined_by_formula_id` 一致性
+
+作为 loader 的结构校验之一
+
+---
+
+### 观察-PR8-C：`dependency_list()` 实际返回无序集合，不是“list”
+
+**现象**：
+
+`FormulaRow.from_dict()` 里将父节点解析为 `frozenset`：
+
+```python
+parents = frozenset(p.strip() for p in raw_parents.split(";") if p.strip())
+```
+
+而 `dependency_list()` 也直接返回 `frozenset`：
+
+```python
+def dependency_list(self, lhs: str) -> FrozenSet[str]:
+    return self.parents_of.get(lhs, frozenset())
+```
+
+对应位置：
+- `sim/v5/spec_loader.py:55-56`
+- `sim/v5/spec_loader.py:296-298`
+
+**问题点**：
+- PR 目标里写的是 `parents -> dependency list`
+- 现在实现更接近 `dependency set`
+- CSV 中父节点原始顺序被丢失
+
+**影响**：
+- 对“仅做存在性校验”来说问题不大
+- 但如果后续 runtime formula engine / 调试输出 / 差异比较依赖父节点顺序，当前 API 不够稳妥
+
+**建议**：
+- 若后续执行层需要稳定顺序，保留原始 parent list，同时可另建 set 用于 membership 校验
+
+---
+
+## 本轮结论
+
+当前 PR 的主体目标（加载 V5 CSV、建立基本索引、拒绝明显坏规格）**已经完成**，
+但从“反向破坏输入”的角度看，至少还有 2 个结构性遗漏 + 1 个 API 语义问题：
+
+| 编号 | 描述 | 类型 | 影响 |
+|------|------|------|------|
+| BUG-PR8-A | duplicate `formula_id` 未被拒绝 | 结构校验遗漏 | 中 |
+| BUG-PR8-B | `formulas` / `variables` 跨表一致性未校验 | 结构校验遗漏 | 中 |
+| 观察-PR8-C | `dependency_list()` 返回无序集合 | API 语义偏差 | 低~中 |
+
+按你的要求：**上述问题仅记录，未在本次提交中修复。**

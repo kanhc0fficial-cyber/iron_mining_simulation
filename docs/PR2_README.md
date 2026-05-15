@@ -24,13 +24,17 @@ PR 2 实现了 V5 引擎的**运行骨架**，即在不执行任何公式 RHS �
 |------|-----|
 | 写入当前步变量 | `store.set(name, value)` |
 | 读取当前步变量 | `store.get(name)` → 缺失时抛 `StateStoreError` |
-| 安全读取（不抛错） | `store.get_or_none(name)` |
-| 判断当前步是否存在 | `name in store` |
+| 安全读取（不抛错） | `store.get_or_none(name)` ⚠️ `None` 值有歧义，见 BUG-3 |
+| 明确判断当前步是否存在 | `store.has(name)` → bool（推荐替代 `get_or_none`）✅ 新增 |
+| 判断当前步是否存在（运算符） | `name in store` |
 | 读取上一步变量 | `store.get_previous(name)` → 解析 `previous_state_reference` 类父节点 |
-| 推进时间步 | `store.advance()` → current → previous，清空 current 和 dcs_buffer |
+| 推进时间步 | `store.advance()` → current → previous，清空 current；DCS 保存为 `previous_dcs` |
 | 写入 DCS 输出缓冲 | `store.set_dcs(name, value)` |
 | 读取 DCS 输出缓冲 | `store.get_dcs(name)` |
+| 推荐：消费并清空 DCS 缓冲 | `store.flush_dcs()` → dict ✅ 新增，在 `advance()` 前调用 |
+| 读取上一步 DCS（advance 后仍可读） | `store.previous_dcs` dict ✅ 新增 |
 | 当前步快照（测试用） | `store.snapshot()` |
+| 全量快照（测试/调试用） | `store.snapshot_full()` → `{current, previous, dcs_buffer, previous_dcs}` ✅ 新增 |
 
 **重要约束：**
 - `StateStore` 只保留 **1 步历史**（`previous` = 上一步 `current`）。
@@ -85,11 +89,11 @@ boundary (010–030)
   → magnetic (100–120)
     → tower_mill (200–250)
       → flotation (300–350)
-        → lab (400)
-          → label (500)
+        → dcs (360)          ← DCS 代理信号 + froth fault closures [BUG-1 修复后加入]
+          → lab (400)
+            → label (500)
 
-[global]  ← 17 个定义型公式，当前未进入调度 (BUG-1)
-[dcs]     ← 3 个 DCS 代理公式，当前未进入调度 (BUG-1)
+[global]  ← 17 个 definition 类公式（helper 定义），不作为独立步骤调度，由公式求值器内联调用
 ```
 
 ---
@@ -128,23 +132,23 @@ for step in range(n_steps):
 
 | 测试类 | 测试数 | 覆盖内容 |
 |--------|--------|---------|
-| `TestStateStore` | 13 | set/get、advance、previous、DCS buffer、snapshot |
+| `TestStateStore` | 25 | set/get、advance、previous、DCS buffer、snapshot、has()、flush_dcs()、previous_dcs、snapshot_full() |
 | `TestExternalInputRegistry` | 12 | 注册检查、分类查询、断言守卫 |
-| `TestExecutionScheduler` | 14 | 阶段顺序、步骤排序、公式过滤、manual 可见性、run_step |
+| `TestExecutionScheduler` | 19 | 阶段顺序（含 dcs）、步骤排序、公式过滤、manual 可见性、run_step、dcs 阶段验证 |
 | `TestStateAndRegistryIntegration` | 3 | previous_state_reference 模式、注册守卫集成 |
-| **合计** | **44** | |
+| **合计** | **59** | |
 
 ---
 
 ## 已知问题（摘要）
 
-| ID | 严重度 | 说明 |
-|----|--------|------|
-| BUG-1 | 严重 | `global`/`dcs` 阶段共 20 个公式从未被调度，含 `fx_s{s}_{c}_froth_h`（manual_closure） |
-| BUG-2 | 严重 | `ExternalInputRegistry` 不能单独用作父节点解析守卫，需配合 `FormulaRegistry.by_lhs` |
-| BUG-3 | 中 | `get_or_none()` 对 `None` 值有歧义 |
-| BUG-4 | 中 | `advance()` 清空 DCS buffer，writer 必须先读后 advance |
-| BUG-5 | 中 | 只保留 1 步历史，多步延迟需外部 `DelayBuffer` |
+| ID | 严重度 | 状态 | 说明 |
+|----|--------|------|------|
+| BUG-1 | 严重 | ✅ 已修复 | `dcs` 阶段加入 execution_steps，3 个公式（含 `fx_s{s}_{c}_froth_h` manual_closure）现已调度；调度器启动时对遗漏 executable 阶段抛 ValueError |
+| BUG-2 | 严重 | ⚠️ 已文档化 | `ExternalInputRegistry` 不能单独用作父节点解析守卫，需配合 `FormulaRegistry.by_lhs` |
+| BUG-3 | 中 | ✅ 已修复 | 新增 `StateStore.has()` 方法，消除 `get_or_none()` 对 `None` 值的歧义 |
+| BUG-4 | 中 | ✅ 已修复 | `advance()` 保存 `previous_dcs`；新增 `flush_dcs()` 推荐写法 |
+| BUG-5 | 中 | ⚠️ 已文档化 | 只保留 1 步历史，多步延迟需外部 `DelayBuffer` |
 
 完整描述见 [`docs/PR2_BUG_REPORT.md`](./PR2_BUG_REPORT.md)。
 

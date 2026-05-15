@@ -17,5 +17,6 @@ step_order,stage,description
 330,flotation,Update cell apparent level control and outflow.
 340,flotation,"Update CSTR component inventories, froth/tail rates and stream topology."
 350,flotation,Update flotation DCS measurements and series power.
+360,dcs,Compute DCS proxy signals and froth fault closures.
 400,lab,Sample process lab variables using sample_time/report_time delays.
 500,label,Generate final labels from physically delayed final concentrate streams only.

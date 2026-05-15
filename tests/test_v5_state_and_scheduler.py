@@ -1,11 +1,12 @@
 """Tests for PR-2: StateStore, ExternalInputRegistry, ExecutionScheduler.
 
 Covers the PR-2 requirements:
-- execution steps order: boundary -> magnetic -> tower_mill -> flotation -> lab -> label
+- execution steps order: boundary -> magnetic -> tower_mill -> flotation -> dcs -> lab -> label
 - unregistered parent access fails
 - previous_state_reference can be read from StateStore at previous step
 - external input classification can be queried
 - stage formulas don't include concept/reference roles
+- all executable formulas in the registry are dispatched by the scheduler
 """
 from __future__ import annotations
 
@@ -129,6 +130,72 @@ class TestStateStore:
         assert store.get_previous("x") == pytest.approx(1.0)
         assert store.get_previous("y") == pytest.approx(2.0)
 
+    def test_has_returns_true_for_current(self):
+        store = StateStore()
+        store.set("q", 3.14)
+        assert store.has("q") is True
+
+    def test_has_returns_false_for_missing(self):
+        store = StateStore()
+        assert store.has("nonexistent") is False
+
+    def test_has_returns_false_after_advance(self):
+        """has() only checks current step — returns False after advance."""
+        store = StateStore()
+        store.set("z", 5.0)
+        store.advance()
+        assert store.has("z") is False
+        assert store.get_previous("z") == pytest.approx(5.0)
+
+    def test_flush_dcs_returns_buffer_and_clears(self):
+        store = StateStore()
+        store.set_dcs("P1", 10.0)
+        store.set_dcs("P2", 20.0)
+        flushed = store.flush_dcs()
+        assert flushed == {"P1": 10.0, "P2": 20.0}
+        with pytest.raises(StateStoreError):
+            store.get_dcs("P1")  # buffer was cleared
+
+    def test_flush_dcs_empty_buffer(self):
+        store = StateStore()
+        flushed = store.flush_dcs()
+        assert flushed == {}
+
+    def test_advance_saves_previous_dcs(self):
+        """previous_dcs holds the last step's DCS buffer after advance."""
+        store = StateStore()
+        store.set_dcs("sig", 99.0)
+        store.advance()
+        assert store.previous_dcs == {"sig": 99.0}
+
+    def test_advance_clears_dcs_buffer_but_previous_dcs_readable(self):
+        """After advance(), dcs_buffer is cleared but previous_dcs still has values."""
+        store = StateStore()
+        store.set_dcs("sig", 42.0)
+        store.advance()
+        with pytest.raises(StateStoreError):
+            store.get_dcs("sig")  # live buffer is cleared
+        assert store.previous_dcs["sig"] == pytest.approx(42.0)
+
+    def test_snapshot_full_returns_all_buffers(self):
+        store = StateStore()
+        store.set("x", 1.0)
+        store.set_dcs("d1", 7.0)
+        store.advance()
+        store.set("y", 2.0)
+        full = store.snapshot_full()
+        assert full["current"] == {"y": 2.0}
+        assert full["previous"] == {"x": 1.0}
+        assert full["previous_dcs"] == {"d1": 7.0}
+        assert full["dcs_buffer"] == {}
+
+    def test_snapshot_full_is_copy(self):
+        store = StateStore()
+        store.set("a", 5)
+        full = store.snapshot_full()
+        full["current"]["a"] = 999
+        assert store.get("a") == 5  # original unmodified
+
 
 # ---------------------------------------------------------------------------
 # ExternalInputRegistry
@@ -205,9 +272,9 @@ class TestExternalInputRegistry:
 
 class TestExecutionScheduler:
     def test_ordered_stages_correct_sequence(self, scheduler):
-        """Execution steps order: boundary -> magnetic -> tower_mill -> flotation -> lab -> label."""
+        """Execution steps order: boundary -> magnetic -> tower_mill -> flotation -> dcs -> lab -> label."""
         stages = scheduler.ordered_stages()
-        expected = ["boundary", "magnetic", "tower_mill", "flotation", "lab", "label"]
+        expected = ["boundary", "magnetic", "tower_mill", "flotation", "dcs", "lab", "label"]
         assert stages == expected
 
     def test_steps_loaded(self, scheduler):
@@ -305,10 +372,48 @@ class TestExecutionScheduler:
         scheduler.run_step(evaluator)
         # Only stages with runtime formulas appear; label has none so is absent
         stages_with_formulas = [
-            s for s in ["boundary", "magnetic", "tower_mill", "flotation", "lab", "label"]
+            s for s in ["boundary", "magnetic", "tower_mill", "flotation", "dcs", "lab", "label"]
             if scheduler.formulas_for_stage(s)
         ]
         assert seen_stages == stages_with_formulas
+
+    def test_dcs_stage_in_execution_plan(self, scheduler):
+        """dcs stage is present in execution plan (BUG-1 fix)."""
+        assert "dcs" in scheduler.ordered_stages()
+
+    def test_dcs_stage_formulas_not_empty(self, scheduler):
+        """dcs stage has runtime formulas dispatched (BUG-1 fix)."""
+        dcs_formulas = scheduler.formulas_for_stage("dcs")
+        assert len(dcs_formulas) > 0
+
+    def test_dcs_stage_positioned_after_flotation(self, scheduler):
+        """dcs stage runs after flotation but before lab in pipeline order."""
+        stages = scheduler.ordered_stages()
+        flotation_idx = stages.index("flotation")
+        dcs_idx = stages.index("dcs")
+        lab_idx = stages.index("lab")
+        assert flotation_idx < dcs_idx < lab_idx
+
+    def test_fx_froth_h_manual_closure_in_dcs_stage(self, scheduler):
+        """fx_s{s}_{c}_froth_h (manual_closure) is dispatched in dcs stage (C005 fix)."""
+        dcs_formulas = scheduler.formulas_for_stage("dcs")
+        lhs_set = {f.lhs for f in dcs_formulas}
+        assert "fx_s{s}_{c}_froth_h" in lhs_set
+
+    def test_all_registry_executable_formulas_in_scheduler(self, scheduler, registry):
+        """Every 'executable' formula in the registry must be dispatched (BUG-1 guard)."""
+        dispatched = {
+            f.formula_id
+            for stage in scheduler.ordered_stages()
+            for f in scheduler.formulas_for_stage(stage)
+        }
+        for stage, formulas in registry.by_stage.items():
+            for formula in formulas:
+                if formula.formula_role == "executable":
+                    assert formula.formula_id in dispatched, (
+                        f"Executable formula {formula.formula_id} ({formula.lhs!r}, "
+                        f"stage={stage!r}) is NOT dispatched by the scheduler."
+                    )
 
 
 # ---------------------------------------------------------------------------

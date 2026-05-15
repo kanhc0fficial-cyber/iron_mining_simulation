@@ -76,6 +76,25 @@ class ExecutionScheduler:
                     f for f in raw if f.formula_role in _RUNTIME_ROLES
                 ]
 
+        # Guard: raise if any registry stage has executable formulas that are not
+        # covered by any execution step.  This prevents silent formula omission
+        # when a new stage is added to the formula CSV but its execution step row
+        # is forgotten (BUG-1 class of failure).
+        step_stages = frozenset(self._steps_by_stage)
+        uncovered: List[str] = []
+        for stage, formulas in registry.by_stage.items():
+            if stage in step_stages:
+                continue
+            missing_exec = [f for f in formulas if f.formula_role == "executable"]
+            if missing_exec:
+                uncovered.append(stage)
+        if uncovered:
+            raise ValueError(
+                "The following formula stages contain 'executable' formulas but have "
+                f"no row in v5_execution_steps.csv: {sorted(uncovered)}. "
+                "Add the missing stage(s) to v5_execution_steps.csv."
+            )
+
     # ------------------------------------------------------------------
     # Stage / step access
     # ------------------------------------------------------------------

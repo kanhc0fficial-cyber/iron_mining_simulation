@@ -16,6 +16,22 @@ Usage
     cls = inputs.get_classification("B_max")      # "parameter"
     inputs.assert_registered("B_max")             # no-op if registered
     inputs.assert_registered("invented_var")      # raises UnregisteredInputError
+
+Scope limitation
+----------------
+This registry covers **external input parents only** — parameters, exogenous
+inputs, and ``previous_state_reference`` lag variables listed in
+``v5_external_inputs.csv``.  It does **not** know about formula-derived
+variables (formula LHS names stored in
+:attr:`~sim.v5.spec_loader.FormulaRegistry.by_lhs`).
+
+A formula evaluator resolving a parent must therefore check **both** sources:
+
+1. :meth:`is_registered` — for external / parameter parents.
+2. ``name in formula_registry.by_lhs`` — for derived / computed parents.
+
+Using :meth:`assert_registered` alone as the parent-resolution guard will
+incorrectly reject valid derived variables such as ``C_feed`` or ``B_eff``.
 """
 from __future__ import annotations
 
@@ -54,6 +70,11 @@ class ExternalInputRegistry:
         self.by_classification: Dict[str, List[ExternalInputRow]] = {}
 
         for row in self.rows:
+            if row.parent in self.by_parent:
+                raise ValueError(
+                    f"Duplicate external input parent '{row.parent}' found in "
+                    "v5_external_inputs.csv. Each parent name must be unique."
+                )
             self.by_parent[row.parent] = row
             self.by_classification.setdefault(row.classification, []).append(row)
 

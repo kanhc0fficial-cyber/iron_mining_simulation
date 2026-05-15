@@ -48,6 +48,7 @@ class StateStore:
         self.current: Dict[str, Any] = {}
         self.previous: Dict[str, Any] = {}
         self.dcs_buffer: Dict[str, Any] = {}
+        self.previous_dcs: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Current step access
@@ -73,10 +74,35 @@ class StateStore:
         return self.current[name]
 
     def get_or_none(self, name: str) -> Optional[Any]:
-        """Return the current-step value or *None* if not yet written."""
+        """Return the current-step value or *None* if not yet written.
+
+        .. warning::
+            This method is ambiguous when a variable has been explicitly set to
+            ``None``.  In that case ``get_or_none`` returns ``None`` for both
+            *"not written"* and *"written with value None"*.  Use :meth:`has`
+            for an unambiguous existence check.
+        """
         return self.current.get(name)
 
+    def has(self, name: str) -> bool:
+        """Return ``True`` if *name* has been written in the current step.
+
+        Unlike ``name in store`` (which is an alias for this method), the name
+        ``has`` makes the semantics explicit: it tests the *current* step only.
+        Variables that were written in a prior step and are accessible via
+        :meth:`get_previous` are **not** considered present by this check.
+        """
+        return name in self.current
+
     def __contains__(self, name: str) -> bool:
+        """Return ``True`` if *name* is present in the **current** step.
+
+        .. note::
+            This checks the current step only.  A variable that was written in
+            the previous step (accessible via :meth:`get_previous`) is **not**
+            considered present by this operator.  Use :meth:`has` for the same
+            check with an explicit name.
+        """
         return name in self.current
 
     # ------------------------------------------------------------------
@@ -113,11 +139,21 @@ class StateStore:
         """Advance the store to the next time step.
 
         Copies ``current`` into ``previous``, then clears ``current`` so
-        that it can be repopulated by the next evaluation cycle.  The
-        ``dcs_buffer`` is also cleared ready for the next step's DCS writes.
+        that it can be repopulated by the next evaluation cycle.
+
+        The DCS buffer is saved to ``previous_dcs`` before being cleared so
+        that it remains readable after the advance (e.g. for a late-reading
+        output writer).  Callers that need to flush the buffer *before*
+        advancing should use :meth:`flush_dcs` instead.
+
+        .. note::
+            To avoid silent DCS data loss, prefer reading the DCS buffer
+            (via :meth:`get_dcs` or :meth:`flush_dcs`) **before** calling
+            ``advance()``.
         """
         self.previous = dict(self.current)
         self.current = {}
+        self.previous_dcs = dict(self.dcs_buffer)
         self.dcs_buffer = {}
 
     # ------------------------------------------------------------------
@@ -142,6 +178,22 @@ class StateStore:
             )
         return self.dcs_buffer[name]
 
+    def flush_dcs(self) -> Dict[str, Any]:
+        """Return a copy of the DCS buffer and clear it.
+
+        This is the recommended way for the output writer to consume the DCS
+        buffer.  Calling :meth:`flush_dcs` before :meth:`advance` ensures no
+        DCS values are lost.
+
+        Returns
+        -------
+        dict
+            Shallow copy of the DCS buffer at the time of the call.
+        """
+        snapshot = dict(self.dcs_buffer)
+        self.dcs_buffer = {}
+        return snapshot
+
     # ------------------------------------------------------------------
     # Snapshot (for testing / debug)
     # ------------------------------------------------------------------
@@ -149,3 +201,22 @@ class StateStore:
     def snapshot(self) -> Dict[str, Any]:
         """Return a shallow copy of the current state dict."""
         return dict(self.current)
+
+    def snapshot_full(self) -> Dict[str, Any]:
+        """Return a dict containing shallow copies of all internal buffers.
+
+        Useful for debugging and test assertions that need to inspect the full
+        store state (current values, previous step values, and DCS buffer).
+
+        Returns
+        -------
+        dict
+            Keys: ``"current"``, ``"previous"``, ``"dcs_buffer"``,
+            ``"previous_dcs"``.
+        """
+        return {
+            "current": dict(self.current),
+            "previous": dict(self.previous),
+            "dcs_buffer": dict(self.dcs_buffer),
+            "previous_dcs": dict(self.previous_dcs),
+        }

@@ -193,11 +193,20 @@ def topology_feed_j_rate(
 ) -> float:
     """Compute the feed mass flow of component j into a flotation stage.
 
-    Simplified formula: ``feed_j = Q_feed_s * feed_grade_j_s``.
+    .. todo::
+        **BUG-PR9-F / Stub** — current implementation is a scalar approximation
+        that ignores cell-to-cell cascade relationships.
 
-    The full V5 spec implements a cascade model (Q_in[0] = Q_total_s,
-    Q_in[c] = Q_out[c-1]); this helper provides the scalar approximation
-    used by the engine skeleton.
+        The full V5 spec requires a cascade model where each cell's inflow equals
+        the previous cell's outflow:
+
+        .. code-block:: text
+
+            Q_in[0]  = Q_total_s
+            Q_in[c]  = Q_out[c-1]   (outflow = inflow - mass floated off)
+
+        Until the cascade model is implemented, all cells receive the same feed
+        rate, underestimating the downstream cell depletion.
 
     Parameters
     ----------
@@ -341,8 +350,13 @@ def build_helpers_namespace(rng=None) -> dict:
         "integral": lambda error: 0.0,
         # Conditional helper: ifelse(condition, true_val, false_val)
         "ifelse": lambda cond, tv, fv: float(tv) if cond else float(fv),
-        # standardized helper: simplified normalization — returns mean of inputs.
-        # Full implementation would z-score each input using rolling statistics.
+        # standardized helper: placeholder normalization.
+        # TODO BUG-PR9-F: returns a simple arithmetic mean of raw inputs.
+        # A production implementation should z-score each input using rolling
+        # (or step-initialised) statistics so that signals with different
+        # physical units are properly normalised before aggregation.
+        # Until fixed, online_froth_proxy / online_load_proxy outputs are
+        # dimensionally inconsistent (different units mixed into one average).
         "standardized": lambda *args: sum(float(a) for a in args) / max(len(args), 1),
         # logit helper (used in F200_i formula)
         "logit": lambda p: safe_log(max(float(p), _EPS) / max(1.0 - float(p), _EPS)),

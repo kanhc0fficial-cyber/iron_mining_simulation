@@ -80,9 +80,25 @@ def preprocess_rhs(rhs: str) -> str:
       this step is a no-op since ``N`` is in the helper namespace)
     * Strip inline comments (``# …``) that appear after the expression.
     * Strip leading/trailing whitespace.
+
+    Template-variable detection
+    ---------------------------
+    V5 formula names use ``{s,c}``-style placeholders (e.g. ``Q_air_{s,c}``)
+    to indicate indexed formulas.  Python cannot parse these as identifiers, so
+    any RHS that still contains un-expanded brace-subscripts raises
+    :class:`UnsupportedFormulaError` **before** the expression is passed to
+    ``eval()``.  This prevents opaque ``SyntaxError`` crashes and allows the
+    engine to count template formulas separately from missing-symbol failures.
     """
     if not rhs or rhs.strip().upper() in {"NAN", "NAN;", ""}:
         return "float('nan')"
+
+    # Detect un-expanded template placeholders like {s,c}, {s}, {c}, {0,1}
+    if re.search(r"\{[^}]+\}", rhs):
+        raise UnsupportedFormulaError(
+            f"Formula RHS contains un-expanded template placeholder: {rhs!r}. "
+            "The formula must be instantiated for each index value before evaluation."
+        )
 
     # Replace ^ with ** for exponentiation (V5 spec uses ^ like math notation)
     expr = rhs.replace("^", "**")
@@ -157,7 +173,19 @@ class FormulaEvaluator:
         The ``X_prev`` injection ensures that V5 naming convention
         ``matrix_clog_prev`` resolves to ``store.previous["matrix_clog"]``
         even when only ``matrix_clog`` is a key in the previous-state dict.
+
+        .. note::
+            Previous-state values are also injected as plain ``X`` (in addition
+            to ``X_prev``) so that carry-over state variables (temperatures,
+            slow dynamics) remain accessible in formulas that have not yet been
+            computed this step.  This means that if an upstream formula fails or
+            is skipped, its downstream consumers will silently fall back to the
+            last-known value rather than raising ``NameError``.  Callers that
+            need to detect stale-dependency usage should inspect the ``skipped``
+            dict on the engine after each step.
         """
+        from sim.v5.helpers import lab_sample_template as _lab_sample_template_fn
+
         ns: Dict[str, Any] = {}
 
         # 1. Helpers
@@ -178,6 +206,21 @@ class FormulaEvaluator:
         ns["eps"] = 1e-10
         ns["dt"] = self._dt
         ns["_step_time"] = step_time
+
+        # BUG-PR9-B fix: override the lab_sample_template wrapper so that
+        # step_time is the *actual* current simulation clock, not the wrapper's
+        # default 0.0.  Without this, any report_time > 0 would leave the lab
+        # formula permanently returning NaN regardless of how many steps have run.
+        _st = step_time
+        _rng = self._rng
+
+        def _lab_step_bound(x_val, sample_time, report_time, sigma_sampling, sigma_assay):
+            return _lab_sample_template_fn(
+                x_val, sample_time, report_time, sigma_sampling, sigma_assay,
+                step_time=_st, rng=_rng,
+            )
+
+        ns["lab_sample_template"] = _lab_step_bound
 
         return ns
 

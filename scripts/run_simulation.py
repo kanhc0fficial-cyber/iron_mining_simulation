@@ -88,6 +88,8 @@ def main() -> None:
         sim.warm_up()
 
     n_steps = args.steps if args.steps is not None else sim_cfg.n_steps
+    if n_steps <= 0:
+        raise ValueError(f"--steps 必须是正整数，得到 {n_steps!r}")
     print(f"[仿真] 开始仿真 {n_steps} 步 ...", flush=True)
     t0 = time.perf_counter()
 

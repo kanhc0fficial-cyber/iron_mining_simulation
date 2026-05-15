@@ -29,6 +29,7 @@ Usage
 from __future__ import annotations
 
 import random as _random_module
+import warnings
 from typing import Any, Dict, FrozenSet, List, Optional, Set
 
 from sim.v5.execution_scheduler import ExecutionScheduler
@@ -532,9 +533,26 @@ class V5SimulationEngine:
         ----------
         n_steps :
             Number of steps to execute (must be ≥ 1).
+
+        Warns
+        -----
+        RuntimeWarning
+            Emitted after all steps complete if any formulas were skipped
+            (i.e. could not be evaluated).  Inspect :attr:`skipped` for
+            details.  The engine does not raise because some formulas are
+            skeleton stubs that are intentionally unsupported at this stage.
         """
         for _ in range(n_steps):
             self.step()
+
+        if self.skipped:
+            warnings.warn(
+                f"V5SimulationEngine: {len(self.skipped)} formula(s) could not be "
+                f"evaluated and were skipped (executed={len(self.executed_lhs)}). "
+                "Call engine.run_summary() for details.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     # ------------------------------------------------------------------
     # Stage execution
@@ -610,3 +628,36 @@ class V5SimulationEngine:
             for f in self._registry.formulas
             if f.status == "manual_promoted"
         ]
+
+    @property
+    def skipped_count(self) -> int:
+        """Number of formulas that could not be evaluated."""
+        return len(self.skipped)
+
+    def run_summary(self) -> str:
+        """Return a human-readable execution summary string.
+
+        Reports counts of executed vs skipped formulas, and a breakdown of
+        skipped reasons (UnsupportedFormulaError vs FormulaEvaluationError).
+
+        Returns
+        -------
+        str
+            Multi-line summary text, suitable for printing or logging.
+        """
+        total = len(self.executed_lhs) + len(self.skipped)
+        lines = [
+            f"V5SimulationEngine run summary (step_count={self.step_count})",
+            f"  executed : {len(self.executed_lhs)} / {total}",
+            f"  skipped  : {len(self.skipped)} / {total}",
+        ]
+        if self.skipped:
+            unsupported = sum(
+                1 for v in self.skipped.values() if v.startswith("UnsupportedFormulaError")
+            )
+            eval_err = sum(
+                1 for v in self.skipped.values() if v.startswith("FormulaEvaluationError")
+            )
+            lines.append(f"    └─ UnsupportedFormulaError : {unsupported}")
+            lines.append(f"    └─ FormulaEvaluationError  : {eval_err}")
+        return "\n".join(lines)

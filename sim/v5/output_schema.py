@@ -13,7 +13,7 @@ Columns are grouped by stage:
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# Magnetic separation DCS (9 points)
+# Magnetic separation DCS (10 points)
 # ---------------------------------------------------------------------------
 _MAG_DCS: list[str] = [
     "agg_mag_excit_voltage",

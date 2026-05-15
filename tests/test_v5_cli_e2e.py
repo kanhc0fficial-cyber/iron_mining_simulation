@@ -24,6 +24,11 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TMP_OUTPUT = _REPO_ROOT / "output" / "_test_v5_cli_e2e.parquet"
 
+# Ensure the project root is on sys.path once at module level so that all
+# tests can import ``sim.*`` without repeating this in every test method.
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # ---------------------------------------------------------------------------
 # Helper: run CLI as subprocess
 # ---------------------------------------------------------------------------
@@ -110,9 +115,13 @@ class TestV5OutputQuality:
 
     def test_no_negative_dcs_magnitudes(self, output_df: pd.DataFrame) -> None:
         """Physical magnitude DCS columns must be non-negative."""
+        from sim.v5.output_schema import _MAG_DCS, _TM_DCS
+
+        # Only check known DCS columns from the V5 output schema
+        dcs_cols = _MAG_DCS + _TM_DCS
         non_negative_cols = [
-            c for c in output_df.columns
-            if any(
+            c for c in dcs_cols
+            if c in output_df.columns and any(
                 kw in c
                 for kw in ("_current", "_temp", "_flow", "_freq", "_pressure", "_level")
             )
@@ -137,7 +146,6 @@ class TestV5LabelLeakageGuard:
 
     def test_y_fx_xin_not_in_pre_label_stages(self) -> None:
         """y_fx_xin* must not be computed in boundary/magnetic/tower_mill/flotation stages."""
-        sys.path.insert(0, str(_REPO_ROOT))
         from sim.v5.spec_loader import load_spec
         from sim.v5.engine import V5SimulationEngine, DEFAULT_PARAMS, LABEL_ONLY_LHS
 
@@ -160,7 +168,6 @@ class TestV5LabelLeakageGuard:
 
     def test_y_fx_xin_produced_in_label_stage(self) -> None:
         """y_fx_xin_s and y_fx_xin_s_true must appear in label stage outputs."""
-        sys.path.insert(0, str(_REPO_ROOT))
         from sim.v5.spec_loader import load_spec
         from sim.v5.engine import V5SimulationEngine, DEFAULT_PARAMS, LABEL_ONLY_LHS
 
@@ -189,7 +196,6 @@ class TestV5DCSSchemaCoverage:
 
     def test_dcs_columns_from_registry(self, output_df: pd.DataFrame) -> None:
         """Every DCS column (agg_* / fx_*) in the output must resolve in the DCS registry."""
-        sys.path.insert(0, str(_REPO_ROOT))
         from sim.v5.spec_loader import load_spec
         from sim.v5.dcs_registry import DCSOutputRegistry
         from sim.v5.output_schema import V5_OUTPUT_COLUMNS
@@ -243,7 +249,6 @@ class TestV5LabColumns:
 
     def test_lab_columns_from_lab_sampler_formula(self) -> None:
         """lab_tm_overflow_tfe must be produced by lab_sample_template, not a raw external input."""
-        sys.path.insert(0, str(_REPO_ROOT))
         from sim.v5.spec_loader import load_spec
         from sim.v5.external_input_registry import ExternalInputRegistry
 

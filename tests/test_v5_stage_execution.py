@@ -661,3 +661,206 @@ class TestV5RegistryCrossChecks:
             if f.status == "manual_promoted"
         }
         assert required.issubset(magnetic_promoted)
+
+
+# ---------------------------------------------------------------------------
+# Bug regression tests (discovered 2026-05-15, fixed in this session)
+# ---------------------------------------------------------------------------
+
+
+class TestBugRegressions:
+    """Regression tests for bugs discovered by angle-script probing."""
+
+    # ------------------------------------------------------------------
+    # BUG-A: _eval_and_store() silently dropped None-returning formulas
+    # ------------------------------------------------------------------
+
+    def test_none_returning_formula_is_in_skipped(self, registry):
+        """A formula that evaluates to None must appear in engine.skipped."""
+        import warnings
+        from sim.v5.spec_loader import FormulaRow
+
+        engine = V5SimulationEngine(registry)
+        fake_row = FormulaRow(
+            formula_id="FAKE_NONE",
+            stage="boundary",
+            source_v4_line="",
+            source_v4_section="",
+            lhs="none_returning_var",
+            rhs="None",
+            formula_line="",
+            parents=(),
+            state_type="derived",
+            formula_role="executable",
+            observable="no",
+            status="canonical",
+            notes="",
+        )
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            result = engine._eval_and_store(fake_row)
+
+        assert result is None
+        assert "none_returning_var" in engine.skipped
+        assert "none_returning_var" not in engine.executed_lhs
+        assert not engine.store.has("none_returning_var")
+
+    # ------------------------------------------------------------------
+    # BUG-B: FormulaEvaluator.unsupported/failed dicts never populated
+    # ------------------------------------------------------------------
+
+    def test_evaluator_unsupported_populated_on_unresolved_name(self, registry):
+        """FormulaEvaluator.unsupported is populated when NameError occurs."""
+        from sim.v5.state_store import StateStore
+        from sim.v5.formula_evaluator import FormulaEvaluator, UnsupportedFormulaError
+        from sim.v5.spec_loader import FormulaRow
+
+        evaluator = FormulaEvaluator(params={})
+        store = StateStore()
+        fake_row = FormulaRow(
+            formula_id="FAKE_NAME",
+            stage="boundary",
+            source_v4_line="",
+            source_v4_section="",
+            lhs="test_lhs",
+            rhs="nonexistent_variable_xyz * 2",
+            formula_line="",
+            parents=("nonexistent_variable_xyz",),
+            state_type="derived",
+            formula_role="executable",
+            observable="no",
+            status="canonical",
+            notes="",
+        )
+        with pytest.raises(UnsupportedFormulaError):
+            evaluator.eval_formula(fake_row, store)
+
+        assert "test_lhs" in evaluator.unsupported
+        assert "test_lhs" not in evaluator.failed
+
+    def test_evaluator_failed_populated_on_runtime_error(self, registry):
+        """FormulaEvaluator.failed is populated when a runtime error occurs."""
+        from sim.v5.state_store import StateStore
+        from sim.v5.formula_evaluator import FormulaEvaluator, FormulaEvaluationError
+        from sim.v5.spec_loader import FormulaRow
+
+        evaluator = FormulaEvaluator(params={"eps": 1e-10})
+        store = StateStore()
+        fake_row = FormulaRow(
+            formula_id="FAKE_ERR",
+            stage="boundary",
+            source_v4_line="",
+            source_v4_section="",
+            lhs="div_error_var",
+            rhs="1 / 0",
+            formula_line="",
+            parents=(),
+            state_type="derived",
+            formula_role="executable",
+            observable="no",
+            status="canonical",
+            notes="",
+        )
+        with pytest.raises(FormulaEvaluationError):
+            evaluator.eval_formula(fake_row, store)
+
+        assert "div_error_var" in evaluator.failed
+        assert "div_error_var" not in evaluator.unsupported
+
+    # ------------------------------------------------------------------
+    # BUG-D: preprocess_rhs didn't convert semicolons to commas
+    # ------------------------------------------------------------------
+
+    def test_preprocess_rhs_semicolons_converted(self):
+        """Semicolons inside function call args are converted to commas."""
+        from sim.v5.formula_evaluator import preprocess_rhs
+
+        result = preprocess_rhs("F(45e-6;d80_i,n_rr)")
+        assert ";" not in result
+        assert result == "F(45e-6,d80_i,n_rr)"
+
+    def test_f325_i_no_longer_syntax_error(self, registry):
+        """F325_i formula (was 'F(45e-6;d80_i,n_rr)') no longer raises SyntaxError."""
+        from sim.v5.formula_evaluator import preprocess_rhs
+
+        row = registry.by_lhs.get("F325_i")
+        assert row is not None, "F325_i not in registry"
+        # preprocess must not raise UnsupportedFormulaError / SyntaxError
+        expr = preprocess_rhs(row.rhs)
+        assert ";" not in expr
+
+    # ------------------------------------------------------------------
+    # BUG-F: advance() dropped variables not written in current step
+    # ------------------------------------------------------------------
+
+    def test_advance_preserves_unwritten_variables_in_previous(self):
+        """Variables not written in a step survive in previous after advance."""
+        from sim.v5.state_store import StateStore
+
+        store = StateStore()
+        store.set("x", 10.0)
+        store.set("y", 20.0)
+        store.advance()  # step 1: x=10, y=20 → previous
+
+        # Step 2: only update x, not y
+        store.set("x", 11.0)
+        store.advance()
+
+        # y must still be in previous (from step 1 merge)
+        assert store.get_previous("y") == pytest.approx(20.0)
+        assert store.get_previous("x") == pytest.approx(11.0)
+
+    def test_advance_latest_value_wins_on_merge(self):
+        """When merging, the latest computed value for a variable wins."""
+        from sim.v5.state_store import StateStore
+
+        store = StateStore()
+        store.set("T", 25.0)
+        store.advance()
+        store.set("T", 30.0)
+        store.advance()
+
+        assert store.get_previous("T") == pytest.approx(30.0)
+
+    # ------------------------------------------------------------------
+    # BUG-G: warning fired even for expected template-placeholder skips
+    # ------------------------------------------------------------------
+
+    def test_no_warning_when_only_template_skips(self, registry):
+        """No RuntimeWarning is emitted when all skips are template placeholders."""
+        import warnings
+        engine = V5SimulationEngine(registry)
+
+        # Capture warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            engine.run(1)
+
+        runtime_warnings = [x for x in w if issubclass(x.category, RuntimeWarning)]
+        # Template-placeholder skips alone must NOT produce a warning.
+        # If unexpected (non-template) skips exist, a warning is expected.
+        unexpected = {
+            lhs: msg for lhs, msg in engine.skipped.items()
+            if "template placeholder" not in msg
+        }
+        if not unexpected:
+            assert len(runtime_warnings) == 0, (
+                "Warning fired despite all skips being expected template placeholders"
+            )
+        else:
+            # At least one warning should mention the count
+            assert len(runtime_warnings) >= 1
+
+    def test_warning_message_includes_template_count(self, registry):
+        """Warning message includes the template_placeholders count."""
+        import warnings
+        engine = V5SimulationEngine(registry)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            engine.run(1)
+
+        for warning in w:
+            if issubclass(warning.category, RuntimeWarning):
+                assert "template_placeholders=" in str(warning.message)
+

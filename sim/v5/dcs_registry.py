@@ -57,14 +57,20 @@ class DCSOutputRegistry:
         self.rows: List[DCSOutputRow] = list(formula_registry.dcs_outputs)
 
         self.by_name: Dict[str, DCSOutputRow] = {}
+
+        # Pass 1: register every row by its exact dcs_name so that individual
+        # rows are never overwritten by a compound row that shares a prefix.
         for row in self.rows:
-            # Some rows contain semicolon-separated names (e.g.
-            # "agg_mag_tailings_valve1/2") — register the primary name only.
+            self.by_name[row.dcs_name] = row
+
+        # Pass 2: register split prefixes only if the prefix is not already
+        # taken by a dedicated row (e.g. "agg_mag_tailings_valve1" is a real
+        # row, so the prefix from "agg_mag_tailings_valve1/2" must not
+        # overwrite it).
+        for row in self.rows:
             key = row.dcs_name.split("/")[0].strip()
-            self.by_name[key] = row
-            # Also register the raw name in case it doesn't contain "/"
             if key != row.dcs_name:
-                self.by_name[row.dcs_name] = row
+                self.by_name.setdefault(key, row)
 
     # ------------------------------------------------------------------
     # Lookup helpers

@@ -546,13 +546,28 @@ class V5SimulationEngine:
             self.step()
 
         if self.skipped:
-            warnings.warn(
-                f"V5SimulationEngine: {len(self.skipped)} formula(s) could not be "
-                f"evaluated and were skipped (executed={len(self.executed_lhs)}). "
-                "Call engine.run_summary() for details.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            # Distinguish expected template-placeholder skips (un-expanded
+            # index subscripts like {s,c}) from unexpected runtime failures.
+            # Only warn about unexpected failures to keep the signal meaningful.
+            unexpected = {
+                lhs: msg
+                for lhs, msg in self.skipped.items()
+                if "template placeholder" not in msg
+            }
+            template_count = len(self.skipped) - len(unexpected)
+            if unexpected:
+                warnings.warn(
+                    f"V5SimulationEngine: {len(unexpected)} formula(s) could not be "
+                    f"evaluated and were skipped (executed={len(self.executed_lhs)}, "
+                    f"template_placeholders={template_count}). "
+                    "Call engine.run_summary() for details.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            elif template_count:
+                # All skips are expected template stubs — no warning needed,
+                # but the information remains accessible via run_summary().
+                pass
 
     # ------------------------------------------------------------------
     # Stage execution
@@ -596,9 +611,17 @@ class V5SimulationEngine:
             result = self._evaluator.eval_formula(
                 formula, self.store, step_time=self.step_time
             )
-            if result is not None:
-                self.store.set(formula.lhs, result)
-                self.executed_lhs.add(formula.lhs)
+            if result is None:
+                # A formula that returns Python None produced no output value.
+                # Record it as skipped so callers can detect the gap instead of
+                # silently losing the variable from the state store.
+                self.skipped.setdefault(
+                    formula.lhs,
+                    "FormulaEvaluationError: formula returned None (no output produced)",
+                )
+                return None
+            self.store.set(formula.lhs, result)
+            self.executed_lhs.add(formula.lhs)
             return result
         except UnsupportedFormulaError as exc:
             # Explicit unsupported helper — logged, not silently skipped
